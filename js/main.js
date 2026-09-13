@@ -1,5 +1,5 @@
 /* =====================================================
-   NEXORA — UI Interactions (Vanilla JS)
+   NEXORA — Interacciones de UI (JavaScript puro)
    ===================================================== */
 
 document.addEventListener('DOMContentLoaded', function () {
@@ -91,11 +91,11 @@ document.addEventListener('DOMContentLoaded', function () {
         e.preventDefault();
         const btn = form.querySelector('button[type="submit"]');
         if (btn) {
-          const original = btn.innerHTML;
-          btn.innerHTML = 'Sending...';
+          original = btn.innerHTML;
+          btn.innerHTML = 'Enviando...';
           btn.disabled = true;
           setTimeout(() => {
-            btn.innerHTML = 'Message sent ✓';
+            btn.innerHTML = 'Mensaje enviado ✓';
             setTimeout(() => {
               btn.innerHTML = original;
               btn.disabled = false;
