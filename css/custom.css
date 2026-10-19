@@ -761,7 +761,7 @@ a { text-decoration: none; }
    PAGE HEADER (sub-pages)
    ===================================================== */
 .page-header {
-  background: var(--n-gradient-dark);
+  background: var(--n-gradient-soft);
   padding: 8rem 0 4rem;
   position: relative;
   overflow: hidden;
@@ -779,19 +779,27 @@ a { text-decoration: none; }
   background: radial-gradient(circle, rgba(0,74,173,0.25) 0%, transparent 70%);
 }
 
-.page-header h1 { color: #fff; }
+.page-header h1 { color: var(--n-navy); margin-bottom: 1rem; }
+
+.page-header p {
+  color: var(--n-slate);
+  margin-inline: auto;
+}
 
 .breadcrumb-custom {
   display: inline-flex;
   gap: 0.5rem;
   font-size: 0.9rem;
-  color: rgba(255,255,255,0.6);
+  color: var(--n-slate);
   font-weight: 500;
+  margin-bottom: 1rem;
+  position: relative;
+  z-index: 1;
 }
 
-.breadcrumb-custom a { color: rgba(255,255,255,0.6); }
-.breadcrumb-custom a:hover { color: #fff; }
-.breadcrumb-custom .active { color: var(--n-primary); }
+.breadcrumb-custom a { color: var(--n-slate); }
+.breadcrumb-custom a:hover { color: var(--n-primary); }
+.breadcrumb-custom .active { color: var(--n-navy); }
 
 /* =====================================================
    SCROLL REVEAL (lightweight)
@@ -946,4 +954,178 @@ a { text-decoration: none; }
   background: var(--n-bg);
   border-radius: var(--n-radius-md);
   height: 100%;
+}
+
+/* =====================================================
+   GRUPO AVITAR — Service cards / pricing / optimize
+   ===================================================== */
+.service-card {
+  background: #fff;
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius-md);
+  box-shadow: var(--n-shadow-sm);
+  padding: var(--n-space-lg);
+  transition: all 0.3s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.service-card:hover {
+  box-shadow: var(--n-shadow-md);
+  transform: translateY(-6px);
+  border-color: transparent;
+}
+
+.service-card .card-title { font-size: 1.15rem; margin-bottom: 0.5rem; }
+
+.price-tag {
+  font-family: var(--n-font-display);
+  font-weight: 800;
+  font-size: 1.05rem;
+  color: var(--n-navy);
+  background: var(--n-bg-alt);
+  padding: 0.4rem 0.85rem;
+  border-radius: var(--n-radius-sm);
+  white-space: nowrap;
+}
+
+.price-tag small { font-size: 0.7rem; font-weight: 600; color: var(--n-slate-light); }
+
+.mission-card {
+  background: #fff;
+  border-radius: var(--n-radius-md);
+  box-shadow: var(--n-shadow-sm);
+  border: 1px solid var(--n-border);
+  padding: var(--n-space-lg);
+}
+
+.optimize-banner {
+  background: var(--n-gradient-dark);
+  border-radius: var(--n-radius-lg);
+  padding: var(--n-space-xl) var(--n-space-lg);
+  position: relative;
+  overflow: hidden;
+}
+
+.optimize-banner::before {
+  content: '';
+  position: absolute;
+  top: -100px;
+  right: -100px;
+  width: 350px;
+  height: 350px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(0,74,173,0.3) 0%, transparent 70%);
+}
+
+.optimize-banner h2 { color: #fff; }
+
+.btn-white-custom {
+  background: #fff;
+  color: var(--n-primary);
+  border: none;
+}
+
+.btn-white-custom:hover { background: var(--n-bg-alt); color: var(--n-primary); transform: translateY(-2px); }
+
+.btn-whatsapp-lg {
+  background: #25D366;
+  color: #fff;
+  border: none;
+  box-shadow: 0 12px 24px rgba(37, 211, 102, 0.25);
+}
+
+.btn-whatsapp-lg:hover { background: #1DBB5A; color: #fff; transform: translateY(-2px); }
+
+.badge-soft.bg-white { background: #fff; color: var(--n-slate); border: 1px solid var(--n-border); }
+
+/* Pricing table */
+.pricing-table-wrap {
+  background: #fff;
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius-md);
+  box-shadow: var(--n-shadow-sm);
+  overflow-x: auto;
+}
+
+.pricing-table {
+  width: 100%;
+  margin: 0;
+}
+
+.pricing-table th {
+  font-family: var(--n-font-display);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--n-navy);
+  background: var(--n-bg-alt);
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--n-border);
+  white-space: nowrap;
+}
+
+.pricing-table td {
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--n-border);
+  color: var(--n-slate);
+  font-size: 0.95rem;
+  vertical-align: middle;
+}
+
+.pricing-table tbody tr:last-child td { border-bottom: none; }
+.pricing-table tbody tr:hover { background: var(--n-bg); }
+
+.pricing-table .price-cell {
+  font-family: var(--n-font-display);
+  font-weight: 800;
+  color: var(--n-navy);
+  white-space: nowrap;
+}
+
+.contact-card {
+  background: #fff;
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius-md);
+  box-shadow: var(--n-shadow-sm);
+  padding: var(--n-space-lg);
+  transition: all 0.3s ease;
+}
+
+.contact-card:hover { box-shadow: var(--n-shadow-md); transform: translateY(-6px); }
+
+.need-item {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: #fff;
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius-sm);
+  padding: 1rem 1.25rem;
+  margin-bottom: 0.85rem;
+  transition: all 0.2s ease;
+}
+
+.need-item:hover { border-color: var(--n-primary); box-shadow: var(--n-shadow-sm); }
+
+.need-item .need-num {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  background: var(--n-bg-alt);
+  color: var(--n-primary);
+  font-family: var(--n-font-display);
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.need-item .need-text {
+  font-family: var(--n-font-display);
+  font-weight: 600;
+  color: var(--n-navy);
+  flex: 1;
 }
