@@ -226,6 +226,9 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.match(detailHtml, /googletagmanager\.com\/gtag\/js\?id=G-29YCBD5TL9/);
     assert.match(detailHtml, /gtag\('config', 'G-29YCBD5TL9'\)/);
     assert.match(detailHtml, /<h1 class="jobs-detail-title" itemprop="headline">Panadero artesanal<\/h1>/);
+    assert.match(detailHtml, /Publicación reciente/);
+    assert.match(detailHtml, /Este portal es informativo/);
+    assert.match(detailHtml, /href="\/terminos">Leer Términos y Condiciones<\/a>/);
     assert.match(detailHtml, /jobs-detail-grid/);
     assert.match(detailHtml, /Información clave/);
     assert.match(detailHtml, /wa\.me\/573019441676\?text=/);

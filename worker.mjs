@@ -800,7 +800,7 @@ function renderDetail(request, env, vacancies, slug) {
       <div class="jobs-detail-grid">
         <article class="jobs-detail-main" itemscope itemtype="https://schema.org/Article">
           <header class="jobs-detail-header">
-            <span class="jobs-detail-status">Vacante vigente</span>
+            <span class="jobs-detail-status">Publicación reciente</span>
             <h1 class="jobs-detail-title" itemprop="headline">${escapeHtml(vacancy.title)}</h1>
             <p class="jobs-detail-subtitle">${subtitle}</p>
           </header>
@@ -819,8 +819,9 @@ function renderDetail(request, env, vacancies, slug) {
             </div>
           </section>
           <section class="jobs-detail-note">
-            <strong>Oportunidad vigente</strong>
-            <p>Esta publicación se muestra durante 20 días desde su fecha de publicación.</p>
+            <strong>Información importante</strong>
+            <p>Este portal es informativo. La oferta puede haber cerrado o cambiado; confirma su disponibilidad directamente con el empleador o en el canal original antes de postularte. La publicación puede permanecer aquí hasta 20 días desde su fecha de origen.</p>
+            <a href="/terminos">Leer Términos y Condiciones</a>
           </section>
         </aside>
       </div>
