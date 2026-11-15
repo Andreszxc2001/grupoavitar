@@ -1,4 +1,4 @@
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 15;
 const QUERY_BATCH_SIZE = 500;
 const MAX_PUBLICATIONS = 10000;
 const PUBLICATION_DAYS = 20;
@@ -332,6 +332,22 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
   <meta name="description" content="${escapeHtml(description)}">
   <meta name="robots" content="${escapeHtml(robots)}">
   <link rel="canonical" href="${escapeHtml(canonical)}">
+  <link rel="apple-touch-icon" sizes="57x57" href="/assets/favicon/apple-icon-57x57.png">
+  <link rel="apple-touch-icon" sizes="60x60" href="/assets/favicon/apple-icon-60x60.png">
+  <link rel="apple-touch-icon" sizes="72x72" href="/assets/favicon/apple-icon-72x72.png">
+  <link rel="apple-touch-icon" sizes="76x76" href="/assets/favicon/apple-icon-76x76.png">
+  <link rel="apple-touch-icon" sizes="114x114" href="/assets/favicon/apple-icon-114x114.png">
+  <link rel="apple-touch-icon" sizes="120x120" href="/assets/favicon/apple-icon-120x120.png">
+  <link rel="apple-touch-icon" sizes="144x144" href="/assets/favicon/apple-icon-144x144.png">
+  <link rel="apple-touch-icon" sizes="152x152" href="/assets/favicon/apple-icon-152x152.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/assets/favicon/apple-icon-180x180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/assets/favicon/android-icon-192x192.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="96x96" href="/assets/favicon/favicon-96x96.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/assets/favicon/favicon-16x16.png">
+  <link rel="shortcut icon" href="/assets/favicon/favicon.ico">
+  <meta name="msapplication-TileColor" content="#004AAD">
+  <meta name="theme-color" content="#004AAD">
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-29YCBD5TL9"></script>
   <script>
     window.dataLayer = window.dataLayer || [];
@@ -430,8 +446,6 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
     .jobs-detail-note { padding: 1.2rem 1.4rem; background: var(--n-gradient-soft); }
     .jobs-detail-note strong { display: block; margin-bottom: .35rem; color: var(--n-navy); }
     .jobs-detail-note p { margin: 0; color: var(--n-slate); font-size: .9rem; }
-    .jobs-footer { background: var(--n-navy); color: #fff; padding: 2rem 0; }
-    .jobs-footer a { color: #fff; }
     .jobs-pagination a[aria-current="page"] { color: #fff; background: var(--n-primary); }
     .jobs-pagination { flex-wrap: wrap; justify-content: flex-start !important; }
     @media (max-width: 991.98px) { .jobs-hero { padding-top: 2rem; } .jobs-search { grid-template-columns: repeat(2, minmax(0, 1fr)); } .jobs-detail-grid { grid-template-columns: 1fr; } .jobs-hero h1, .jobs-detail-title { font-size: 1.8rem; } .jobs-section-head h2 { font-size: 1.45rem; } .jobs-hero-count strong { font-size: 1.6rem; } }
@@ -463,11 +477,48 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
     </div>
   </nav>
   ${body}
-  <footer class="jobs-footer mt-5">
-    <div class="container d-flex flex-wrap justify-content-between gap-3">
-      <span>&copy; ${new Date().getFullYear()} Grupo Avitar</span>
-      <a href="/empleos">Ofertas de empleo</a>
-      <a href="/">Inicio</a>
+  <footer class="footer-nexora">
+    <div class="container">
+      <div class="row gy-4">
+        <div class="col-lg-4 col-md-6">
+          <a class="d-inline-block mb-3" href="/"><img src="/assets/img/logo1.png" alt="Grupo Avitar" style="height:48px;width:auto;"></a>
+          <p class="text-white-50 mb-4" style="max-width:320px;">Servicio especializado en la elaboración, organización y optimización de documentos laborales y profesionales.</p>
+          <div class="d-flex gap-2">
+            <a href="#" class="social-icon" aria-label="X"><i class="fa-brands fa-x-twitter"></i></a>
+            <a href="#" class="social-icon" aria-label="LinkedIn"><i class="fa-brands fa-linkedin-in"></i></a>
+            <a href="#" class="social-icon" aria-label="Facebook"><i class="fa-brands fa-facebook-f"></i></a>
+            <a href="#" class="social-icon" aria-label="Instagram"><i class="fa-brands fa-instagram"></i></a>
+          </div>
+        </div>
+        <div class="col-lg-2 col-md-6 col-6">
+          <h6>Empresa</h6>
+          <a href="/about.html">Sobre nosotros</a>
+          <a href="/services.html">Servicios</a>
+          <a href="/empleos">Ofertas de empleo</a>
+          <a href="/contact.html">Contacto</a>
+        </div>
+        <div class="col-lg-2 col-md-6 col-6">
+          <h6>Servicios</h6>
+          <a href="/servicio-ats.html">Hojas de Vida ATS</a>
+          <a href="/servicio-hdv.html">Hojas de Vida Profesionales</a>
+          <a href="/servicio-ctr.html">Cartas de Renuncia</a>
+          <a href="/services.html#optimizacion">Optimización de Perfiles</a>
+          <a href="/servicio-ctp.html">Catálogos e Infoproductos</a>
+        </div>
+        <div class="col-lg-4 col-md-6">
+          <h6>Contáctanos</h6>
+          <p class="text-white-50 mb-3">Escríbenos y cuéntanos qué necesitas. Nuestro equipo te orientará sobre el servicio que puede ayudarte.</p>
+          <a href="https://wa.me/573019441676" target="_blank" rel="noopener" class="btn btn-primary"><i class="fa-brands fa-whatsapp me-1"></i> Escribir por WhatsApp</a>
+        </div>
+      </div>
+      <div class="footer-bottom d-flex flex-column flex-md-row justify-content-between align-items-center gap-2 text-center text-md-start">
+        <p class="mb-0">&copy; ${new Date().getFullYear()} Grupo Avitar. Todos los derechos reservados.</p>
+        <div class="d-flex flex-wrap gap-4">
+          <a href="/privacidad.html" class="mb-0">Política de Privacidad</a>
+          <a href="/terminos.html" class="mb-0">Términos y Condiciones</a>
+          <a href="/cookies.html" class="mb-0">Política de Cookies</a>
+        </div>
+      </div>
     </div>
   </footer>
   <script src="https://kit.fontawesome.com/3140323153.js" crossorigin="anonymous"></script>
@@ -587,15 +638,19 @@ function renderListing(request, env, vacancies) {
       (!endDate || publishedDate <= endDate)
     );
   });
-  const page = Number(rawPage);
-  const totalPages = Math.max(1, Math.ceil(filteredVacancies.length / PAGE_SIZE));
+  const page = filtersApplied ? 1 : Number(rawPage);
+  const totalPages = filtersApplied
+    ? 1
+    : Math.max(1, Math.ceil(filteredVacancies.length / PAGE_SIZE));
   if (!Number.isSafeInteger(page) || page > totalPages) {
     return htmlResponse(request, "<!doctype html><title>Página no encontrada</title>", 404);
   }
 
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
   const canonical = `${siteUrl}/empleos${filtersApplied ? "" : page > 1 ? `?page=${page}` : ""}`;
-  const pageItems = filteredVacancies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const pageItems = filtersApplied
+    ? filteredVacancies
+    : filteredVacancies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const cards = pageItems.map((vacancy) => listingCard(vacancy, siteUrl)).join("");
   const pagination = totalPages > 1
     ? `<nav class="jobs-pagination d-flex justify-content-center gap-2 mt-5" aria-label="Paginación">${Array.from({ length: totalPages }, (_, index) => {
@@ -658,7 +713,7 @@ function renderListing(request, env, vacancies) {
           <h2>Vacantes disponibles</h2>
           <p>Solo ofertas laborales identificadas y aún vigentes.</p>
         </div>
-        <span class="jobs-result-count">${filteredVacancies.length} ${filteredVacancies.length === 1 ? "resultado" : "resultados"}</span>
+        <span class="jobs-result-count">${filteredVacancies.length} ${filteredVacancies.length === 1 ? "resultado" : "resultados"}<small class="d-block fw-normal">${filtersApplied ? "Mostrando todas las coincidencias" : `Mostrando ${pageItems.length} en esta página`}</small></span>
       </header>
       <form class="jobs-search" action="/empleos" method="get" role="search">
         <div class="jobs-search-field">
@@ -783,10 +838,30 @@ function renderDetail(request, env, vacancies, slug) {
   );
 }
 
+const STATIC_PAGE_PATHS = [
+  "/about",
+  "/contact",
+  "/cookies",
+  "/privacidad",
+  "/services",
+  "/terminos",
+  "/servicio-ajt",
+  "/servicio-ats",
+  "/servicio-cdr",
+  "/servicio-ctp",
+  "/servicio-ctr",
+  "/servicio-drp",
+  "/servicio-ebk",
+  "/servicio-hdv",
+  "/servicio-hfp",
+  "/servicio-hvm",
+];
+
 function renderSitemap(env, vacancies, head = false) {
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
   const urls = [
     `${siteUrl}/`,
+    ...STATIC_PAGE_PATHS.map((path) => `${siteUrl}${path}`),
     `${siteUrl}/empleos`,
     ...vacancies.map((vacancy) => `${siteUrl}/empleos/${vacancy.slug}`),
   ];

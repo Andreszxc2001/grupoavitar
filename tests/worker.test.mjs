@@ -178,6 +178,12 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.match(listingHtml, /href="\/contact\.html">Contacto/);
     assert.match(listingHtml, /id="mainNav"/);
     assert.match(listingHtml, /\/assets\/js\/main\.js/);
+    assert.match(listingHtml, /<footer class="footer-nexora">/);
+    assert.match(listingHtml, /logo1\.png/);
+    assert.match(listingHtml, /href="\/privacidad\.html"/);
+    assert.match(listingHtml, /Escribir por WhatsApp/);
+    assert.match(listingHtml, /href="\/assets\/favicon\/favicon-32x32\.png"/);
+    assert.match(listingHtml, /href="\/assets\/favicon\/favicon\.ico"/);
     assert.match(listingHtml, /googletagmanager\.com\/gtag\/js\?id=G-29YCBD5TL9/);
     assert.match(listingHtml, /gtag\('config', 'G-29YCBD5TL9'\)/);
     assert.doesNotMatch(listingHtml, /Se busca panadero artesanal|OCR_ONLY_TEXT_DO_NOT_RENDER/);
@@ -238,6 +244,38 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.match(noImageDetailHtml, /<h1 class="jobs-detail-title" itemprop="headline">Auxiliar de bodega<\/h1>/);
     assert.match(noImageDetailHtml, /src="\/assets\/img\/empleo-placeholder\.svg"/);
     assert.match(detailHtml, /Descripción/);
+
+    const sitemap = await worker.fetch(
+      new Request("https://grupoavitar.com/sitemap.xml"),
+      env,
+    );
+    const sitemapXml = await sitemap.text();
+    assert.equal(sitemap.status, 200);
+    for (const path of [
+      "/",
+      "/about",
+      "/contact",
+      "/cookies",
+      "/privacidad",
+      "/services",
+      "/terminos",
+      "/servicio-ajt",
+      "/servicio-ats",
+      "/servicio-cdr",
+      "/servicio-ctp",
+      "/servicio-ctr",
+      "/servicio-drp",
+      "/servicio-ebk",
+      "/servicio-hdv",
+      "/servicio-hfp",
+      "/servicio-hvm",
+      "/empleos",
+      "/empleos/panadero-artesanal-santa-marta-12345678",
+      "/empleos/auxiliar-de-bodega-cartagena-aaaaaaaa",
+    ]) {
+      assert.ok(sitemapXml.includes(`<loc>https://grupoavitar.com${path}</loc>`), path);
+    }
+
     assert.equal(supabaseReads, 1);
     assert.equal(forwardedKey, serviceKey);
     assert.equal(detailHtml.includes(serviceKey), false);
@@ -248,7 +286,7 @@ test("renders listings and job detail as server HTML with canonical metadata", a
   }
 });
 
-test("shows 50 jobs per listing page and 12 featured jobs on the homepage", async () => {
+test("shows 15 jobs per initial listing page, all search matches, and 12 featured jobs", async () => {
   const previousCache = globalThis.caches;
   const previousFetch = globalThis.fetch;
   const cache = new Map();
@@ -291,14 +329,23 @@ test("shows 50 jobs per listing page and 12 featured jobs on the homepage", asyn
     const listing = await worker.fetch(new Request("https://grupoavitar.com/empleos"), env);
     const listingHtml = await listing.text();
     assert.equal(listing.status, 200);
-    assert.equal((listingHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 50);
+    assert.equal((listingHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 15);
+    assert.match(listingHtml, /Mostrando 15 en esta página/);
+    assert.match(listingHtml, /aria-label="Paginación"/);
 
     const secondPage = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?page=2"),
       env,
     );
     const secondPageHtml = await secondPage.text();
-    assert.equal((secondPageHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 1);
+    assert.equal((secondPageHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 15);
+
+    const fourthPage = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos?page=4"),
+      env,
+    );
+    const fourthPageHtml = await fourthPage.text();
+    assert.equal((fourthPageHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 6);
 
     const searchAllPages = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?q=Auxiliar%2051"),
@@ -307,6 +354,28 @@ test("shows 50 jobs per listing page and 12 featured jobs on the homepage", asyn
     const searchHtml = await searchAllPages.text();
     assert.equal((searchHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 1);
     assert.match(searchHtml, /Auxiliar 51/);
+
+    const searchAllMatches = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos?q=Auxiliar"),
+      env,
+    );
+    const searchAllMatchesHtml = await searchAllMatches.text();
+    assert.equal(
+      (searchAllMatchesHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length,
+      51,
+    );
+    assert.doesNotMatch(searchAllMatchesHtml, /aria-label="Paginación"/);
+
+    const searchWithOldPage = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos?q=Auxiliar&page=2"),
+      env,
+    );
+    const searchWithOldPageHtml = await searchWithOldPage.text();
+    assert.equal(searchWithOldPage.status, 200);
+    assert.equal(
+      (searchWithOldPageHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length,
+      51,
+    );
 
     const homepage = await worker.fetch(new Request("https://grupoavitar.com/"), env);
     const homepageHtml = await homepage.text();
