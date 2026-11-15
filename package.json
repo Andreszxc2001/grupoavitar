@@ -1,0 +1,12 @@
+{
+  "name": "grupoavitar",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "wrangler dev --ip 127.0.0.1 --port 8787",
+    "test": "node --test tests/worker.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.34.0"
+  }
+}

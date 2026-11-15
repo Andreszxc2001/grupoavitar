@@ -1,0 +1,50 @@
+{
+  "name": "grupoavitar-empleos",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-15",
+  "workers_dev": true,
+  "vars": {
+    "SUPABASE_URL": "https://ebrwwhjmzygiryemnmcd.supabase.co",
+    "SITE_URL": "https://grupoavitar.com"
+  },
+  "assets": {
+    "directory": ".",
+    "binding": "ASSETS",
+    "not_found_handling": "none",
+    "html_handling": "auto-trailing-slash",
+    "run_worker_first": [
+      "/",
+      "/index.html",
+      "/empleos",
+      "/empleos/*",
+      "/sitemap.xml",
+      "/robots.txt"
+    ]
+  },
+  "routes": [
+    {
+      "pattern": "grupoavitar.com/",
+      "zone_name": "grupoavitar.com"
+    },
+    {
+      "pattern": "grupoavitar.com/index.html",
+      "zone_name": "grupoavitar.com"
+    },
+    {
+      "pattern": "grupoavitar.com/empleos",
+      "zone_name": "grupoavitar.com"
+    },
+    {
+      "pattern": "grupoavitar.com/empleos/*",
+      "zone_name": "grupoavitar.com"
+    },
+    {
+      "pattern": "grupoavitar.com/sitemap.xml",
+      "zone_name": "grupoavitar.com"
+    },
+    {
+      "pattern": "grupoavitar.com/robots.txt",
+      "zone_name": "grupoavitar.com"
+    }
+  ]
+}

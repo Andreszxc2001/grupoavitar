@@ -1,0 +1,12 @@
+.git/
+.wrangler/
+node_modules/
+tests/
+worker.mjs
+wrangler.jsonc
+package.json
+pnpm-lock.yaml
+.gitignore
+.assetsignore
+.dev.vars*
+*.md

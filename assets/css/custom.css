@@ -61,10 +61,15 @@ html { scroll-behavior: smooth; }
 
 body {
   font-family: var(--n-font-body);
+  font-size: .95rem;
   color: var(--n-slate);
   background-color: var(--n-white);
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
+}
+
+img, video, iframe, canvas, svg {
+  max-width: 100%;
 }
 
 h1, h2, h3, h4, h5, h6,
@@ -75,9 +80,12 @@ h1, h2, h3, h4, h5, h6,
   letter-spacing: -0.02em;
 }
 
-h1 { font-weight: 800; }
+h1 { font-size: clamp(1.55rem, 2.35vw, 2.15rem); font-weight: 800; line-height: 1.2; }
+h2 { font-size: clamp(1.3rem, 1.8vw, 1.65rem); line-height: 1.3; }
+h3 { font-size: clamp(1.05rem, 1.3vw, 1.3rem); line-height: 1.35; }
 
-p { line-height: 1.7; }
+p { line-height: 1.55; }
+p.fs-5 { font-size: clamp(.95rem, 1.1vw, 1.05rem) !important; }
 
 a { text-decoration: none; }
 
@@ -308,15 +316,15 @@ a { text-decoration: none; }
 
 .hero-content { position: relative; z-index: 2; }
 
-.hero h1 { font-size: 3.25rem; line-height: 1.15; }
+.hero h1 { font-size: clamp(1.65rem, 2.6vw, 2.2rem); line-height: 1.2; }
 
 @media (max-width: 991.98px) {
-  .hero { padding-top: 7rem; text-align: center; }
-  .hero h1 { font-size: 2.4rem; }
+  .hero { padding-top: 7rem; text-align: left; }
+  .hero h1 { font-size: 1.9rem; }
 }
 
 @media (max-width: 575.98px) {
-  .hero h1 { font-size: 2rem; }
+  .hero h1 { font-size: 1.65rem; }
 }
 
 /* Hero visual / dashboard mock card */
@@ -384,7 +392,7 @@ a { text-decoration: none; }
 
 .stat-item .stat-number {
   font-family: var(--n-font-display);
-  font-size: 2.25rem;
+  font-size: clamp(1.5rem, 2vw, 2rem);
   font-weight: 800;
   color: var(--n-navy);
 }
@@ -504,7 +512,7 @@ a { text-decoration: none; }
 
 .price {
   font-family: var(--n-font-display);
-  font-size: 3rem;
+  font-size: clamp(1.8rem, 2.5vw, 2.2rem);
   font-weight: 800;
   color: var(--n-navy);
 }
@@ -765,7 +773,7 @@ a { text-decoration: none; }
   padding: 8rem 0 4rem;
   position: relative;
   overflow: hidden;
-  text-align: center;
+  text-align: left;
 }
 
 .page-header::before {
@@ -783,7 +791,7 @@ a { text-decoration: none; }
 
 .page-header p {
   color: var(--n-slate);
-  margin-inline: auto;
+  margin-inline: 0;
 }
 
 .breadcrumb-custom {
@@ -826,6 +834,116 @@ a { text-decoration: none; }
 .divider-line { height: 1px; background: var(--n-border); border: none; }
 
 .rounded-img { border-radius: var(--n-radius-lg); }
+
+.home-jobs-section .jobs-card {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--n-border);
+  border-radius: var(--n-radius-lg);
+  background: #fff;
+  box-shadow: var(--n-shadow-sm);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.home-jobs-section .jobs-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--n-shadow-md);
+}
+
+.home-jobs-section .jobs-card-media {
+  display: grid;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  place-items: center;
+  border-bottom: 1px solid var(--n-border);
+  background: var(--n-bg);
+}
+
+.home-jobs-section .jobs-card-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.home-jobs-section .jobs-card-body {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  padding: 1.4rem;
+}
+
+.home-jobs-section .jobs-card-label {
+  align-self: flex-start;
+  margin-bottom: 0.75rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: var(--n-radius-pill);
+  background: var(--n-bg-alt);
+  color: var(--n-primary);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.home-jobs-section .jobs-card-title {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-bottom: 0.9rem;
+  color: var(--n-navy);
+  font-size: 1.15rem;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.home-jobs-section .jobs-card-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  color: var(--n-slate);
+  font-size: 0.84rem;
+  list-style: none;
+}
+
+.home-jobs-section .jobs-card-salary {
+  margin: 0 0 0.85rem;
+  color: var(--n-navy);
+  font-weight: 700;
+}
+
+.home-jobs-section .jobs-card-description {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0 0 1.3rem;
+  color: var(--n-slate);
+  font-size: 0.92rem;
+  line-height: 1.65;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.home-jobs-section .jobs-card-action {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.55rem;
+  margin-top: auto;
+  padding: 0.75rem 1rem;
+  border: 0;
+  border-radius: var(--n-radius-sm);
+  background: var(--n-gradient-primary);
+  color: #fff;
+  font-weight: 700;
+}
+
+.home-jobs-section .jobs-card-action:hover {
+  background: var(--n-primary-dark);
+  color: #fff;
+}
 
 .badge-soft {
   background: var(--n-bg-alt);
@@ -1128,4 +1246,48 @@ a { text-decoration: none; }
   font-weight: 600;
   color: var(--n-navy);
   flex: 1;
+}
+
+@media (max-width: 991.98px) {
+  .navbar-nexora.fixed-top {
+    position: sticky;
+    top: 0;
+    background: rgba(255, 255, 255, .97);
+    box-shadow: var(--n-shadow-sm);
+  }
+  .hero { padding-top: 2rem; }
+  .page-header { padding-top: 2rem; }
+  body { font-size: .9rem; }
+  h1, .hero h1, .page-header h1 { font-size: 1.7rem; }
+  h2 { font-size: 1.4rem; }
+  h3 { font-size: 1.1rem; }
+  .page-header { padding-bottom: 3rem; }
+  .section-subtitle { font-size: .95rem; }
+}
+
+@media (max-width: 767.98px) {
+  body { font-size: .875rem; }
+  h1, .hero h1, .page-header h1 { font-size: 1.5rem; line-height: 1.25; }
+  h2 { font-size: 1.25rem; }
+  h3, .card-premium .card-title { font-size: 1.05rem; }
+  p.fs-5 { font-size: .95rem !important; }
+  h3[style*="font-size:2rem"] { font-size: 1.35rem !important; }
+  .hero { padding-top: 2rem; }
+  .hero .justify-content-center { justify-content: flex-start !important; }
+  .page-header { padding: 2rem 0 2.5rem; }
+  .section-title { font-size: 1.25rem; }
+  .section-subtitle { font-size: .875rem; }
+  .text-center { text-align: left !important; }
+  .footer-bottom { align-items: flex-start !important; text-align: left !important; }
+  .btn-lg-custom { max-width: 100%; padding: .75rem 1rem; font-size: .9rem; }
+  .card-premium, .contact-card, .service-card, .pricing-card, .mission-card { padding: 1.25rem; }
+  .optimize-banner { padding: 2rem 1.25rem; }
+  .price { font-size: 1.75rem; }
+  .stat-item .stat-number { font-size: 1.7rem; }
+}
+
+@media (max-width: 575.98px) {
+  h1, .hero h1, .page-header h1 { font-size: 1.4rem; }
+  h2, .section-title { font-size: 1.2rem; }
+  p.fs-5 { font-size: .9rem !important; }
 }

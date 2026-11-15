@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" role="img" aria-labelledby="title description">
+  <title id="title">Oportunidad laboral</title>
+  <desc id="description">Ilustración de un maletín para publicaciones de empleo sin imagen.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f2f6ff"/>
+      <stop offset="1" stop-color="#dce8fb"/>
+    </linearGradient>
+    <linearGradient id="case" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#145bc2"/>
+      <stop offset="1" stop-color="#0a1f4d"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="360" fill="url(#background)"/>
+  <circle cx="521" cy="68" r="95" fill="#c8daf7" opacity=".65"/>
+  <circle cx="105" cy="312" r="117" fill="#d2e7e1" opacity=".72"/>
+  <rect x="176" y="91" width="288" height="178" rx="28" fill="#fff" opacity=".88"/>
+  <rect x="250" y="124" width="140" height="22" rx="11" fill="#dce8fb"/>
+  <path d="M239 168h162a22 22 0 0 1 22 22v52a20 20 0 0 1-20 20H237a20 20 0 0 1-20-20v-52a22 22 0 0 1 22-22Z" fill="url(#case)"/>
+  <path d="M272 168v-15a17 17 0 0 1 17-17h62a17 17 0 0 1 17 17v15" fill="none" stroke="#0a1f4d" stroke-linecap="round" stroke-width="12"/>
+  <path d="M219 196h202M304 191v17h32v-17" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="9"/>
+  <circle cx="443" cy="91" r="20" fill="#64d9a1"/>
+  <path d="m434 91 6 6 12-13" fill="none" stroke="#0a1f4d" stroke-linecap="round" stroke-linejoin="round" stroke-width="5"/>
+  <text x="320" y="306" fill="#0a1f4d" font-family="Arial, sans-serif" font-size="17" font-weight="700" letter-spacing="3" text-anchor="middle">OPORTUNIDAD LABORAL</text>
+</svg>
