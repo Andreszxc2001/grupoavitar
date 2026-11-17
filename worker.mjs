@@ -255,6 +255,12 @@ function queryWords(value) {
     .map((word) => word.slice(0, 4));
 }
 
+function slugSearchTerms(slug) {
+  return queryWords(
+    slug.replace(/-[0-9a-f]{8}$/i, "").replace(/-/g, " "),
+  ).slice(0, 4).join(" ");
+}
+
 function dateFilterIso(value, endOfDay = false) {
   return `${value}T${endOfDay ? "04:59:59.999" : "05:00:00.000"}Z`;
 }
@@ -265,7 +271,6 @@ function publicationQueryUrl(env, now, options = {}) {
     cityTerm = "",
     startDate = "",
     endDate = "",
-    idPrefix = "",
     limit = QUERY_BATCH_SIZE,
     offset = 0,
   } = options;
@@ -284,7 +289,6 @@ function publicationQueryUrl(env, now, options = {}) {
   if (endDate) {
     url.searchParams.append("fecha_publicacion", `lte.${dateFilterIso(endDate, true)}`);
   }
-  if (idPrefix) url.searchParams.set("id", `like.${idPrefix}%`);
   const contentFields = ["texto_ia", "texto_ocr", "canal_nombre"];
   for (const word of queryWords(searchTerm)) {
     const pattern = `*${word}*`;
@@ -1076,7 +1080,12 @@ export default {
             "Cache-Control": "no-store",
           });
         }
-        vacancies = await getVacancies(env, now, { idPrefix }, QUERY_BATCH_SIZE);
+        vacancies = await getVacancies(
+          env,
+          now,
+          { searchTerm: slugSearchTerms(slug) },
+          MAX_QUERY_ROWS,
+        );
       }
 
       if (isHomeRoute) {
