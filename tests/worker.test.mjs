@@ -279,7 +279,7 @@ test("renders listings and job detail as server HTML with canonical metadata", a
       assert.ok(sitemapXml.includes(`<loc>https://grupoavitar.com${path}</loc>`), path);
     }
 
-    assert.equal(supabaseReads, 1);
+    assert.ok(supabaseReads >= 4);
     assert.equal(forwardedKey, serviceKey);
     assert.equal(detailHtml.includes(serviceKey), false);
     assert.equal(noImageDetailHtml.includes(serviceKey), false);
@@ -289,7 +289,7 @@ test("renders listings and job detail as server HTML with canonical metadata", a
   }
 });
 
-test("shows 15 jobs per initial listing page, all search matches, and 12 featured jobs", async () => {
+test("limits the listing to 50 recent jobs, filters searches on the server, and features 12 jobs", async () => {
   const previousCache = globalThis.caches;
   const previousFetch = globalThis.fetch;
   const cache = new Map();
@@ -310,9 +310,20 @@ test("shows 15 jobs per initial listing page, all search matches, and 12 feature
     });
   });
   let supabaseReads = 0;
-  globalThis.fetch = async () => {
+  const requestedLimits = [];
+  globalThis.fetch = async (requestUrl) => {
     supabaseReads += 1;
-    return new Response(JSON.stringify(posts), {
+    const query = new URL(requestUrl);
+    const limit = Number(query.searchParams.get("limit"));
+    const offset = Number(query.searchParams.get("offset") || 0);
+    requestedLimits.push({ limit, offset });
+    const orFilters = query.searchParams.getAll("or");
+    const matches = posts.filter((post) => orFilters.every((filter) => {
+      const patterns = [...filter.matchAll(/ilike\.\*([^*]+)\*/g)].map((match) => match[1]);
+      return patterns.some((pattern) => [post.texto_ia, post.texto_ocr, post.canal_nombre]
+        .some((value) => value.toLowerCase().includes(pattern)));
+    }));
+    return new Response(JSON.stringify(matches.slice(offset, offset + limit)), {
       headers: { "Content-Type": "application/json" },
     });
   };
@@ -332,52 +343,44 @@ test("shows 15 jobs per initial listing page, all search matches, and 12 feature
     const listing = await worker.fetch(new Request("https://grupoavitar.com/empleos"), env);
     const listingHtml = await listing.text();
     assert.equal(listing.status, 200);
-    assert.equal((listingHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 15);
-    assert.match(listingHtml, /Mostrando 15 en esta página/);
-    assert.match(listingHtml, /aria-label="Paginación"/);
+    assert.equal((listingHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 50);
+    assert.match(listingHtml, /Mostrando 50 en esta página/);
+    assert.deepEqual(requestedLimits[0], { limit: 50, offset: 0 });
 
     const secondPage = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?page=2"),
       env,
     );
-    const secondPageHtml = await secondPage.text();
-    assert.equal((secondPageHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 15);
+    assert.equal(secondPage.status, 400);
 
-    const fourthPage = await worker.fetch(
-      new Request("https://grupoavitar.com/empleos?page=4"),
-      env,
-    );
-    const fourthPageHtml = await fourthPage.text();
-    assert.equal((fourthPageHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 6);
-
-    const searchAllPages = await worker.fetch(
+    const searchOne = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?q=Auxiliar%2051"),
       env,
     );
-    const searchHtml = await searchAllPages.text();
-    assert.equal((searchHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 1);
-    assert.match(searchHtml, /Auxiliar 51/);
+    const searchOneHtml = await searchOne.text();
+    assert.equal((searchOneHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 1);
+    assert.match(searchOneHtml, /Auxiliar 51/);
 
-    const searchAllMatches = await worker.fetch(
+    const searchFirstPage = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?q=Auxiliar"),
       env,
     );
-    const searchAllMatchesHtml = await searchAllMatches.text();
+    const searchFirstPageHtml = await searchFirstPage.text();
     assert.equal(
-      (searchAllMatchesHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length,
-      51,
+      (searchFirstPageHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length,
+      50,
     );
-    assert.doesNotMatch(searchAllMatchesHtml, /aria-label="Paginación"/);
+    assert.match(searchFirstPageHtml, /aria-label="Paginación"/);
 
-    const searchWithOldPage = await worker.fetch(
+    const searchSecondPage = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?q=Auxiliar&page=2"),
       env,
     );
-    const searchWithOldPageHtml = await searchWithOldPage.text();
-    assert.equal(searchWithOldPage.status, 200);
+    const searchSecondPageHtml = await searchSecondPage.text();
+    assert.equal(searchSecondPage.status, 200);
     assert.equal(
-      (searchWithOldPageHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length,
-      51,
+      (searchSecondPageHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length,
+      1,
     );
 
     const homepage = await worker.fetch(new Request("https://grupoavitar.com/"), env);
@@ -387,7 +390,7 @@ test("shows 15 jobs per initial listing page, all search matches, and 12 feature
     assert.match(homepageHtml, /Auxiliar 12/);
     assert.doesNotMatch(homepageHtml, /Auxiliar 13/);
     assert.doesNotMatch(homepageHtml, /FEATURED_JOBS/);
-    assert.equal(supabaseReads, 1);
+    assert.ok(supabaseReads >= 5);
   } finally {
     globalThis.caches = previousCache;
     globalThis.fetch = previousFetch;

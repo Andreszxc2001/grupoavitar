@@ -1,6 +1,7 @@
-const PAGE_SIZE = 15;
-const QUERY_BATCH_SIZE = 500;
-const MAX_PUBLICATIONS = 10000;
+const PAGE_SIZE = 50;
+const QUERY_BATCH_SIZE = 100;
+const MAX_QUERY_ROWS = 1000;
+const FEATURED_LIMIT = 12;
 const PUBLICATION_DAYS = 20;
 const EMPLOYMENT_PLACEHOLDER_IMAGE = "/assets/img/empleo-placeholder.svg";
 const WHATSAPP_PHONE = "573019441676";
@@ -246,50 +247,101 @@ function activeVacancies(publications, supabaseUrl, now = new Date()) {
   return vacancies;
 }
 
-async function fetchPublicationRows(env, now) {
-  const apiKey = supabaseReadKey(env);
-  if (!apiKey) throw new Error("No hay una clave válida de solo lectura configurada.");
+function queryWords(value) {
+  return normalize(value)
+    .split(/\s+/)
+    .map((word) => word.replace(/[^\p{L}\p{N}]/gu, ""))
+    .filter(Boolean)
+    .map((word) => word.slice(0, 4));
+}
+
+function dateFilterIso(value, endOfDay = false) {
+  return `${value}T${endOfDay ? "04:59:59.999" : "05:00:00.000"}Z`;
+}
+
+function publicationQueryUrl(env, now, options = {}) {
+  const {
+    searchTerm = "",
+    cityTerm = "",
+    startDate = "",
+    endDate = "",
+    idPrefix = "",
+    limit = QUERY_BATCH_SIZE,
+    offset = 0,
+  } = options;
   const cutoff = new Date(
     now.getTime() - PUBLICATION_DAYS * 24 * 60 * 60 * 1000,
   ).toISOString();
-  const rows = [];
-  for (let offset = 0; offset < MAX_PUBLICATIONS; offset += QUERY_BATCH_SIZE) {
-    const url = new URL("/rest/v1/canales_publicaciones", env.SUPABASE_URL);
-    url.searchParams.set("select", PUBLICATION_FIELDS);
-    url.searchParams.set("fecha_publicacion", `gte.${cutoff}`);
-    url.searchParams.set("order", "fecha_publicacion.desc");
-    url.searchParams.set("limit", String(QUERY_BATCH_SIZE));
-    const response = await fetch(url, {
-      headers: {
-        apikey: apiKey,
-        Authorization: `Bearer ${apiKey}`,
-        "Range-Unit": "items",
-        Range: `${offset}-${offset + QUERY_BATCH_SIZE - 1}`,
-      },
-    });
-    if (!response.ok) {
-      console.error("Supabase publication read failed", response.status);
-      throw new Error("No fue posible consultar las publicaciones.");
-    }
-    const page = await response.json();
-    if (!Array.isArray(page)) throw new Error("Respuesta inválida de Supabase.");
-    rows.push(...page);
-    if (page.length < QUERY_BATCH_SIZE) return rows;
+  const url = new URL("/rest/v1/canales_publicaciones", env.SUPABASE_URL);
+  url.searchParams.set("select", PUBLICATION_FIELDS);
+  url.searchParams.set("fecha_publicacion", `gte.${cutoff}`);
+  url.searchParams.set("order", "fecha_publicacion.desc");
+  url.searchParams.set("limit", String(limit));
+  if (offset > 0) url.searchParams.set("offset", String(offset));
+  if (startDate) {
+    url.searchParams.append("fecha_publicacion", `gte.${dateFilterIso(startDate)}`);
   }
-  throw new Error("Se alcanzó el límite de lectura de publicaciones recientes.");
+  if (endDate) {
+    url.searchParams.append("fecha_publicacion", `lte.${dateFilterIso(endDate, true)}`);
+  }
+  if (idPrefix) url.searchParams.set("id", `like.${idPrefix}%`);
+  const contentFields = ["texto_ia", "texto_ocr", "canal_nombre"];
+  for (const word of queryWords(searchTerm)) {
+    const pattern = `*${word}*`;
+    url.searchParams.append(
+      "or",
+      `(${contentFields.map((field) => `${field}.ilike.${pattern}`).join(",")})`,
+    );
+  }
+  const cityFields = [
+    "metadata->>ciudad",
+    "metadata->>city",
+    "metadata->>ubicacion",
+    "metadata->>location",
+    "texto_ia",
+    "texto_ocr",
+  ];
+  for (const word of queryWords(cityTerm)) {
+    const pattern = `*${word}*`;
+    url.searchParams.append(
+      "or",
+      `(${cityFields.map((field) => `${field}.ilike.${pattern}`).join(",")})`,
+    );
+  }
+  return url;
 }
 
-async function getPublications(env, now) {
+async function fetchPublicationRows(env, now, options, url = publicationQueryUrl(env, now, options)) {
+  const apiKey = supabaseReadKey(env);
+  if (!apiKey) throw new Error("No hay una clave válida de solo lectura configurada.");
+  const response = await fetch(url, {
+    headers: {
+      apikey: apiKey,
+      Authorization: `Bearer ${apiKey}`,
+    },
+  });
+  if (response.status === 416) return [];
+  if (!response.ok) {
+    console.error("Supabase publication read failed", response.status);
+    throw new Error("No fue posible consultar las publicaciones.");
+  }
+  const rows = await response.json();
+  if (!Array.isArray(rows)) throw new Error("Respuesta inválida de Supabase.");
+  return rows;
+}
+
+async function getPublicationRows(env, now, options = {}) {
+  const url = publicationQueryUrl(env, now, options);
   const minute = Math.floor(now.getTime() / 60000);
   const accessMode = env.SUPABASE_SERVICE_ROLE_KEY ? "service-role" : "anon";
   const cacheKey = new Request(
-    `${env.SITE_URL}/__cache/publicaciones-laborales/${accessMode}/${minute}`,
+    `${env.SITE_URL}/__cache/publicaciones-laborales/${accessMode}/${minute}${url.pathname}${url.search}`,
   );
   const cache = caches.default;
   const cached = await cache.match(cacheKey);
   if (cached) return cached.json();
 
-  const rows = await fetchPublicationRows(env, now);
+  const rows = await fetchPublicationRows(env, now, options, url);
   await cache.put(
     cacheKey,
     new Response(JSON.stringify(rows), {
@@ -300,6 +352,19 @@ async function getPublications(env, now) {
     }),
   );
   return rows;
+}
+
+async function getVacancies(env, now, options = {}, maxVacancies = PAGE_SIZE) {
+  const rows = [];
+  let offset = 0;
+  while (rows.length < maxVacancies && offset < MAX_QUERY_ROWS) {
+    const limit = Math.min(QUERY_BATCH_SIZE, MAX_QUERY_ROWS - offset, maxVacancies);
+    const page = await getPublicationRows(env, now, { ...options, limit, offset });
+    rows.push(...page);
+    if (page.length < limit) break;
+    offset += limit;
+  }
+  return activeVacancies(rows, env.SUPABASE_URL, now);
 }
 
 function responseHeaders(contentType, extra = {}) {
@@ -580,7 +645,7 @@ function listingCard(vacancy, siteUrl) {
 
 function renderFeaturedJobs(vacancies, env) {
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
-  const featured = vacancies.slice(0, 12);
+  const featured = vacancies.slice(0, FEATURED_LIMIT);
   const content = featured.length
     ? `<div class="row g-4">${featured.map((vacancy) => listingCard(vacancy, siteUrl)).join("")}</div>`
     : '<p class="card-premium">No hay vacantes vigentes para mostrar en este momento.</p>';
@@ -601,12 +666,9 @@ function renderFeaturedJobs(vacancies, env) {
   </section>`;
 }
 
-function renderListing(request, env, vacancies) {
-  const url = new URL(request.url);
+function parseListingFilters(url) {
   const rawPage = url.searchParams.get("page") || "1";
-  if (!/^[1-9]\d*$/.test(rawPage)) {
-    return htmlResponse(request, "<!doctype html><title>Solicitud inválida</title>", 400);
-  }
+  if (!/^[1-9]\d*$/.test(rawPage)) return null;
   const searchTerm = (url.searchParams.get("q") || "").trim().slice(0, 100);
   const cityTerm = (url.searchParams.get("ciudad") || "").trim().slice(0, 80);
   const startDate = (url.searchParams.get("desde") || "").trim();
@@ -616,9 +678,16 @@ function renderListing(request, env, vacancies) {
     !isValidDateFilter(endDate) ||
     (startDate && endDate && startDate > endDate)
   ) {
-    return htmlResponse(request, "<!doctype html><title>Filtros inválidos</title>", 400);
+    return null;
   }
   const filtersApplied = Boolean(searchTerm || cityTerm || startDate || endDate);
+  const page = Number(rawPage);
+  if (!Number.isSafeInteger(page) || (!filtersApplied && page > 1)) return null;
+  return { searchTerm, cityTerm, startDate, endDate, filtersApplied, page };
+}
+
+function renderListing(request, env, vacancies, filters) {
+  const { searchTerm, cityTerm, startDate, endDate, filtersApplied, page } = filters;
   const searchWords = normalize(searchTerm).split(/\s+/).filter(Boolean);
   const normalizedCity = normalize(cityTerm);
   const filteredVacancies = vacancies.filter((vacancy) => {
@@ -638,19 +707,14 @@ function renderListing(request, env, vacancies) {
       (!endDate || publishedDate <= endDate)
     );
   });
-  const page = filtersApplied ? 1 : Number(rawPage);
-  const totalPages = filtersApplied
-    ? 1
-    : Math.max(1, Math.ceil(filteredVacancies.length / PAGE_SIZE));
-  if (!Number.isSafeInteger(page) || page > totalPages) {
+  const totalPages = Math.max(1, Math.ceil(filteredVacancies.length / PAGE_SIZE));
+  if (page > totalPages) {
     return htmlResponse(request, "<!doctype html><title>Página no encontrada</title>", 404);
   }
 
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
-  const canonical = `${siteUrl}/empleos${filtersApplied ? "" : page > 1 ? `?page=${page}` : ""}`;
-  const pageItems = filtersApplied
-    ? filteredVacancies
-    : filteredVacancies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const canonical = `${siteUrl}/empleos${filtersApplied && page > 1 ? `?page=${page}` : ""}`;
+  const pageItems = filteredVacancies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const cards = pageItems.map((vacancy) => listingCard(vacancy, siteUrl)).join("");
   const pagination = totalPages > 1
     ? `<nav class="jobs-pagination d-flex justify-content-center gap-2 mt-5" aria-label="Paginación">${Array.from({ length: totalPages }, (_, index) => {
@@ -986,8 +1050,35 @@ export default {
       });
     }
     try {
-      const publications = await getPublications(env, new Date());
-      const vacancies = activeVacancies(publications, env.SUPABASE_URL);
+      const now = new Date();
+      const filters = url.pathname === "/empleos" ? parseListingFilters(url) : null;
+      if (url.pathname === "/empleos" && !filters) {
+        return htmlResponse(request, "<!doctype html><title>Solicitud inválida</title>", 400);
+      }
+
+      let vacancies = [];
+      if (isHomeRoute) {
+        vacancies = await getVacancies(env, now, {}, FEATURED_LIMIT);
+      } else if (url.pathname === "/sitemap.xml") {
+        vacancies = await getVacancies(env, now, {}, PAGE_SIZE);
+      } else if (filters) {
+        vacancies = await getVacancies(
+          env,
+          now,
+          filters,
+          filters.filtersApplied ? filters.page * PAGE_SIZE + 1 : PAGE_SIZE,
+        );
+      } else {
+        const slug = url.pathname.slice("/empleos/".length);
+        const idPrefix = slug.match(/-([0-9a-f]{8})$/i)?.[1];
+        if (!slug || slug.includes("/") || !idPrefix) {
+          return htmlResponse(request, "<!doctype html><title>Oferta no encontrada</title>", 404, {
+            "Cache-Control": "no-store",
+          });
+        }
+        vacancies = await getVacancies(env, now, { idPrefix }, QUERY_BATCH_SIZE);
+      }
+
       if (isHomeRoute) {
         const assetResponse = await env.ASSETS.fetch(request);
         if (!assetResponse.ok) return assetResponse;
@@ -1009,13 +1100,8 @@ export default {
       if (url.pathname === "/sitemap.xml") {
         return renderSitemap(env, vacancies, request.method === "HEAD");
       }
-      if (url.pathname === "/empleos") return renderListing(request, env, vacancies);
+      if (filters) return renderListing(request, env, vacancies, filters);
       const slug = url.pathname.slice("/empleos/".length);
-      if (!slug || slug.includes("/")) {
-        return htmlResponse(request, "<!doctype html><title>Oferta no encontrada</title>", 404, {
-          "Cache-Control": "no-store",
-        });
-      }
       return renderDetail(request, env, vacancies, slug);
     } catch (error) {
       console.error("Employment page generation failed", error);
