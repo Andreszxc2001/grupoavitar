@@ -4,6 +4,27 @@ const MAX_QUERY_ROWS = 1000;
 const FEATURED_LIMIT = 12;
 const PUBLICATION_DAYS = 20;
 const EMPLOYMENT_PLACEHOLDER_IMAGE = "/assets/img/empleo-placeholder.svg";
+const NOT_AVAILABLE = "No disponible";
+const VACANCY_JSON_KEYS = [
+  "cargo",
+  "titulo",
+  "empresa",
+  "contacto",
+  "requisitos",
+  "descripcion",
+  "tipo_contrato",
+];
+const EMPLOYMENT_TYPE_MAP = {
+  "tiempo completo": "FULL_TIME",
+  indefinido: "FULL_TIME",
+  "contrato indefinido": "FULL_TIME",
+  "contrato temporal": "TEMPORARY",
+  temporal: "TEMPORARY",
+  "medio tiempo": "PART_TIME",
+  "part time": "PART_TIME",
+  pasantia: "INTERN",
+  practicas: "INTERN",
+};
 const WHATSAPP_PHONE = "573019441676";
 const FEATURED_JOBS_MARKER = "<!-- FEATURED_JOBS -->";
 const PUBLICATION_FIELDS = [
@@ -18,38 +39,103 @@ const PUBLICATION_FIELDS = [
   "metadata",
 ].join(",");
 
-const HIRING_SIGNAL =
-  /\b(?:vacantes?|ofertas?\s+(?:de\s+)?(?:empleo|trabajo|laborales?)|se\s+buscan?|se\s+requieren?|se\s+solicitan?|se\s+necesitan?|estamos\s+contratando|contratamos|buscamos\s+(?:personal|un[oa]s?\s+\w+)|requiere\s+personal|convocatoria\s+laboral)\b/i;
-const VACANCY_TYPE =
-  /\b(?:vacante|empleo|oferta laboral|oferta de empleo|oferta de trabajo|oportunidad laboral)\b/i;
-const JOB_SEEKER_SIGNAL =
-  /\b(?:busco\s+(?:empleo|trabajo)|buscando\s+(?:empleo|trabajo)|ofrezco\s+mis\s+servicios)\b/i;
-const HIRING_CONTEXT_SIGNAL =
-  /\b(?:busca(?:n|mos)?|buscando|solicita(?:n|mos)?|requiere(?:n)?|necesita(?:n)?|contrata(?:n|mos)?|contratando|convoca(?:n)?)\b/i;
-const JOB_DESCRIPTION_SIGNAL =
-  /\b(?:requisitos?|responsabilidades|funciones|perfil|contrato|salario|postular|hoja\s+de\s+vida|tiempo\s+completo|indefinido)\b/i;
-const HIRING_TITLE =
-  /\b(?:se\s+buscan?|se\s+requieren?|se\s+solicitan?|se\s+necesitan?|buscamos|contratamos|requiere)\s+(?:(?:un[ao]s?)\s+)?([^.!?\n\r]{2,100})/i;
-const LABELED_TITLE =
-  /^(?:t[ií]tulo|cargo|vacante|puesto|perfil|oferta(?:\s+de\s+empleo)?|oportunidad\s+laboral)\s*[:\-]\s*(.+)$/im;
-const LABELED_LOCATION =
-  /^(?:ubicaci[oó]n|ciudad|municipio|lugar|sede)\s*[:\-]\s*(.{2,80})$/im;
-const LABELED_SALARY =
-  /^(?:salario|sueldo|remuneraci[oó]n|pago)\s*[:\-]\s*(.{1,80})$/im;
-
 function text(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function cleanAiText(value) {
-  return text(value)
-    .replace(/\r/g, "")
-    .replace(/^#{1,6}\s*/gm, "")
-    .replace(/\*\*(.*?)\*\*/g, "$1")
-    .replace(/\*(.*?)\*/g, "$1")
-    .replace(/^\s*[-*]\s+/gm, "• ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isUnavailable(value) {
+  return !text(value) || normalize(value) === normalize(NOT_AVAILABLE);
+}
+
+function displayValue(value, fallback = NOT_AVAILABLE) {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => displayValue(item, "")).filter(Boolean);
+    return items.length ? items.join(", ") : fallback;
+  }
+  if (isPlainObject(value)) return fallback;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  const valueText = text(value);
+  return isUnavailable(valueText) ? fallback : valueText.slice(0, 2000);
+}
+
+function parseJsonObject(value) {
+  const raw = text(value);
+  if (!raw) return null;
+  const candidates = [raw];
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) candidates.push(fenced[1]);
+  const braced = raw.match(/\{[\s\S]*\}/);
+  if (braced?.[0]) candidates.push(braced[0]);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (isPlainObject(parsed)) return parsed;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function hasVacancyKeys(value) {
+  return isPlainObject(value) && VACANCY_JSON_KEYS.some((key) => key in value);
+}
+
+function vacancyJsonFromSources(...sources) {
+  for (const source of sources) {
+    if (isPlainObject(source)) {
+      const nested = [source.vacancy, source.vacante, source.json, source.datos];
+      for (const candidate of [source, ...nested]) {
+        if (hasVacancyKeys(candidate)) return candidate;
+      }
+      continue;
+    }
+    const parsed = parseJsonObject(source);
+    if (hasVacancyKeys(parsed)) return parsed;
+  }
+  return null;
+}
+
+function jsonList(value) {
+  const items = Array.isArray(value)
+    ? value
+    : typeof value === "string" && value.trim()
+    ? value.split(/\r?\n|,/)
+    : [];
+  const cleaned = items.map((item) => displayValue(item, "")).filter(Boolean);
+  return cleaned.length ? cleaned : [NOT_AVAILABLE];
+}
+
+function contactHref(contact) {
+  if (!isPlainObject(contact)) return "";
+  const link = displayValue(contact.link, "");
+  if (link) {
+    const safeLink = safeExternalUrl(link);
+    if (safeLink) return safeLink;
+  }
+  const email = displayValue(contact.correo, "");
+  if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return `mailto:${email}`;
+  const phone = displayValue(contact.telefono, "");
+  if (phone) {
+    const digits = phone.replace(/\D/g, "");
+    if (digits.length >= 7) return `tel:${digits}`;
+  }
+  return "";
+}
+
+function contactLabel(contact) {
+  if (!isPlainObject(contact)) return NOT_AVAILABLE;
+  const phone = displayValue(contact.telefono, "");
+  if (phone) return phone;
+  const email = displayValue(contact.correo, "");
+  if (email) return email;
+  const link = displayValue(contact.link, "");
+  if (link && safeExternalUrl(link)) return "Enlace de contacto";
+  return NOT_AVAILABLE;
 }
 
 function normalize(value) {
@@ -82,53 +168,6 @@ function slugify(value) {
     .replace(/^-+|-+$/g, "")
     .slice(0, 90)
     .replace(/-+$/g, "");
-}
-
-function metadataValue(metadata, keys) {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return "";
-  }
-  for (const key of keys) {
-    const value = metadata[key];
-    if ((typeof value === "string" || typeof value === "number") && String(value).trim()) {
-      return String(value).trim().slice(0, 100);
-    }
-  }
-  return "";
-}
-
-function extractTitle(aiText, ocrText) {
-  for (const content of [aiText, ocrText]) {
-    const cleanedContent = cleanAiText(content);
-    const labeled = cleanedContent.match(LABELED_TITLE);
-    if (labeled?.[1]) return labeled[1].trim().slice(0, 120);
-    const hiringTitle = cleanedContent.match(HIRING_TITLE);
-    if (hiringTitle?.[1]) return hiringTitle[1].trim().slice(0, 120);
-    const firstLine = cleanedContent.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-    if (firstLine) return firstLine.replace(/^[\p{Emoji}\p{P}\s]+/u, "").slice(0, 120);
-  }
-  return "";
-}
-
-function extractLocation(content, metadata) {
-  const structured = metadataValue(metadata, ["ciudad", "city", "ubicacion", "location"]);
-  if (structured) return structured;
-  const match = content.match(LABELED_LOCATION);
-  return match?.[1]?.trim().replace(/\s{2,}/g, " ").slice(0, 80) ?? "";
-}
-
-function extractSalary(content, metadata) {
-  const structured = metadataValue(metadata, [
-    "salario",
-    "salary",
-    "sueldo",
-    "remuneracion",
-  ]);
-  if (structured) return structured;
-  const labeled = content.match(LABELED_SALARY);
-  if (labeled?.[1]) return labeled[1].trim().slice(0, 80);
-  const currency = content.match(/\$\s?\d[\d.,]*(?:\s?(?:COP|USD|pesos))?/i);
-  return currency?.[0]?.trim() ?? "";
 }
 
 function resolveImageUrl(imageUrl, supabaseUrl) {
@@ -179,45 +218,60 @@ function safeExternalUrl(value) {
 }
 
 function isVacancy(publication) {
-  const aiText = text(publication.texto_ia);
-  const ocrText = text(publication.texto_ocr);
-  const content = `${aiText}\n${ocrText}`.trim();
-  if (content.length < 20 || JOB_SEEKER_SIGNAL.test(content)) return false;
-  return (
-    HIRING_SIGNAL.test(content) ||
-    VACANCY_TYPE.test(content) ||
-    VACANCY_TYPE.test(text(publication.tipo)) ||
-    (HIRING_CONTEXT_SIGNAL.test(content) && JOB_DESCRIPTION_SIGNAL.test(content))
+  return Boolean(
+    vacancyJsonFromSources(publication.texto_ia, publication.texto_ocr, publication.metadata),
   );
 }
 
 function publicationToVacancy(publication, supabaseUrl) {
-  const rawAiText = text(publication.texto_ia);
-  const ocrText = text(publication.texto_ocr);
-  const aiText =
-    rawAiText && normalize(rawAiText) !== normalize(ocrText)
-      ? cleanAiText(rawAiText)
-      : "";
-  const duplicateSource = ocrText || rawAiText;
-  const content = `${rawAiText}\n${ocrText}`.trim();
-  const title = extractTitle(rawAiText, ocrText);
+  const structured = vacancyJsonFromSources(
+    publication.texto_ia,
+    publication.texto_ocr,
+    publication.metadata,
+  );
+  if (!structured) return null;
+
   const date = new Date(publication.fecha_publicacion);
   const id = text(publication.id);
-  if (!title || !id || Number.isNaN(date.getTime())) return null;
-  const location = extractLocation(content, publication.metadata);
+  if (!id || Number.isNaN(date.getTime())) return null;
+
+  const title = displayValue(
+    structured.titulo,
+    displayValue(structured.cargo, NOT_AVAILABLE),
+  );
+  const company = displayValue(structured.empresa);
+  const location = displayValue(structured.ubicacion);
+  const slugBase = isUnavailable(title)
+    ? isUnavailable(company)
+      ? "oferta-laboral"
+      : company
+    : `${title} ${location}`;
+  const contact = isPlainObject(structured.contacto) ? structured.contacto : {};
+  const description = displayValue(structured.descripcion);
 
   return {
     id,
-    slug: `${slugify(`${title} ${location}`) || "oferta-laboral"}-${id.slice(0, 8)}`,
+    slug: `${slugify(slugBase) || "oferta-laboral"}-${id.slice(0, 8)}`,
     title,
-    aiText,
+    company,
     location,
-    salary: extractSalary(content, publication.metadata),
+    salary: displayValue(structured.salario),
+    contractType: displayValue(structured.tipo_contrato),
+    description,
+    requirements: jsonList(structured.requisitos),
+    contactLink: displayValue(contact.link),
+    contactEmail: displayValue(contact.correo),
+    contactPhone: displayValue(contact.telefono),
+    contactUrl: contactHref(contact),
+    contactLabel: contactLabel(contact),
+    aiText: description,
     publishedAt: date.toISOString(),
     imageUrl: resolveImageUrl(publication.imagen_url, supabaseUrl),
     channelName: text(publication.canal_nombre),
     channelUrl: safeExternalUrl(publication.canal_url),
-    duplicateKey: normalize(duplicateSource).replace(/[^\p{L}\p{N}]+/gu, " ").trim(),
+    duplicateKey: normalize(JSON.stringify(structured))
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim(),
   };
 }
 
@@ -255,12 +309,6 @@ function queryWords(value) {
     .map((word) => word.slice(0, 4));
 }
 
-function slugSearchTerms(slug) {
-  return queryWords(
-    slug.replace(/-[0-9a-f]{8}$/i, "").replace(/-/g, " "),
-  ).slice(0, 4).join(" ");
-}
-
 function dateFilterIso(value, endOfDay = false) {
   return `${value}T${endOfDay ? "04:59:59.999" : "05:00:00.000"}Z`;
 }
@@ -289,7 +337,21 @@ function publicationQueryUrl(env, now, options = {}) {
   if (endDate) {
     url.searchParams.append("fecha_publicacion", `lte.${dateFilterIso(endDate, true)}`);
   }
-  const contentFields = ["texto_ia", "texto_ocr", "canal_nombre"];
+  const contentFields = [
+    "texto_ocr",
+    "canal_nombre",
+    "texto_ia->>titulo",
+    "texto_ia->>cargo",
+    "texto_ia->>empresa",
+    "texto_ia->>salario",
+    "texto_ia->>ubicacion",
+    "texto_ia->>descripcion",
+    "texto_ia->>tipo_contrato",
+    "texto_ia->>requisitos",
+    "texto_ia->contacto->>link",
+    "texto_ia->contacto->>correo",
+    "texto_ia->contacto->>telefono",
+  ];
   for (const word of queryWords(searchTerm)) {
     const pattern = `*${word}*`;
     url.searchParams.append(
@@ -302,7 +364,7 @@ function publicationQueryUrl(env, now, options = {}) {
     "metadata->>city",
     "metadata->>ubicacion",
     "metadata->>location",
-    "texto_ia",
+    "texto_ia->>ubicacion",
     "texto_ocr",
   ];
   for (const word of queryWords(cityTerm)) {
@@ -390,7 +452,7 @@ function htmlResponse(request, html, status = 200, extraHeaders = {}) {
   });
 }
 
-function layout({ title, description, canonical, image, body, robots = "index,follow" }) {
+function layout({ title, description, canonical, image, body, robots = "index,follow", structuredData = "" }) {
   const socialImage = image || "";
   return `<!doctype html>
 <html lang="es">
@@ -401,6 +463,7 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
   <meta name="description" content="${escapeHtml(description)}">
   <meta name="robots" content="${escapeHtml(robots)}">
   <link rel="canonical" href="${escapeHtml(canonical)}">
+  ${structuredData}
   <link rel="apple-touch-icon" sizes="57x57" href="/assets/favicon/apple-icon-57x57.png">
   <link rel="apple-touch-icon" sizes="60x60" href="/assets/favicon/apple-icon-60x60.png">
   <link rel="apple-touch-icon" sizes="72x72" href="/assets/favicon/apple-icon-72x72.png">
@@ -622,25 +685,91 @@ function isValidDateFilter(value) {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
+function jsonLd(schema) {
+  return `<script type="application/ld+json">${JSON.stringify(schema).replace(/</g, "\\u003c")}</script>`;
+}
+
+function itemListJsonLd(vacancies, siteUrl) {
+  if (!vacancies.length) return "";
+  return jsonLd({
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    itemListElement: vacancies.map((vacancy, index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      name: vacancy.title,
+      url: `${siteUrl}/empleos/${vacancy.slug}`,
+    })),
+  });
+}
+
+function jobPostingJsonLd(vacancy, siteUrl) {
+  if (
+    isUnavailable(vacancy.title) ||
+    isUnavailable(vacancy.description) ||
+    isUnavailable(vacancy.company) ||
+    isUnavailable(vacancy.location)
+  ) {
+    return "";
+  }
+  const description = [
+    vacancy.description,
+    isUnavailable(vacancy.requirements?.join(""))
+      ? ""
+      : `Requisitos: ${vacancy.requirements.join(", ")}`,
+  ].filter(Boolean).join("<br><br>");
+  const schema = {
+    "@context": "https://schema.org",
+    "@type": "JobPosting",
+    title: vacancy.title,
+    description,
+    datePosted: vacancy.publishedAt,
+    hiringOrganization: {
+      "@type": "Organization",
+      name: vacancy.company,
+    },
+    jobLocation: {
+      "@type": "Place",
+      address: {
+        "@type": "PostalAddress",
+        addressLocality: vacancy.location,
+      },
+    },
+    url: `${siteUrl}/empleos/${vacancy.slug}`,
+  };
+  const employmentType = EMPLOYMENT_TYPE_MAP[normalize(vacancy.contractType || "")];
+  if (employmentType) schema.employmentType = employmentType;
+  return jsonLd(schema);
+}
+
 function listingCard(vacancy, siteUrl) {
   const image = vacancy.imageUrl
     ? `<img src="${escapeHtml(vacancy.imageUrl)}" alt="${escapeHtml(vacancy.title)}" loading="lazy" decoding="async">`
     : `<img src="${EMPLOYMENT_PLACEHOLDER_IMAGE}" alt="Imagen ilustrativa de una oportunidad laboral" loading="lazy" decoding="async">`;
-  const description = vacancy.aiText
-    ? `<p class="jobs-card-description">${escapeHtml(vacancy.aiText.slice(0, 320))}${vacancy.aiText.length > 320 ? "…" : ""}</p>`
+  const aiText = displayValue(vacancy.aiText, "");
+  const description = aiText
+    ? `<p class="jobs-card-description">${escapeHtml(aiText.slice(0, 320))}${aiText.length > 320 ? "…" : ""}</p>`
     : "";
+  const requirements = vacancy.requirements?.length
+    ? `<p class="jobs-card-description"><strong>Requisitos:</strong> ${escapeHtml(vacancy.requirements.join(", ").slice(0, 220))}</p>`
+    : "";
+  const facts = [
+    `<li><strong>Empresa:</strong> ${escapeHtml(displayValue(vacancy.company))}</li>`,
+    `<li><strong>Ubicación:</strong> ${escapeHtml(displayValue(vacancy.location))}</li>`,
+    `<li><strong>Contrato:</strong> ${escapeHtml(displayValue(vacancy.contractType))}</li>`,
+    `<li><strong>Contacto:</strong> ${escapeHtml(displayValue(vacancy.contactLabel))}</li>`,
+    `<li><time datetime="${escapeHtml(vacancy.publishedAt)}">${escapeHtml(formatDate(vacancy.publishedAt))}</time></li>`,
+  ].join("");
   return `<article class="col-md-6 col-xl-4">
     <div class="jobs-card">
       <div class="jobs-card-media">${image}</div>
       <div class="jobs-card-body">
         <span class="jobs-card-label">Vacante</span>
         <h3 class="jobs-card-title">${escapeHtml(vacancy.title)}</h3>
-        <ul class="jobs-card-facts">
-          ${vacancy.location ? `<li>${escapeHtml(vacancy.location)}</li>` : ""}
-          <li><time datetime="${escapeHtml(vacancy.publishedAt)}">${escapeHtml(formatDate(vacancy.publishedAt))}</time></li>
-        </ul>
-        ${vacancy.salary ? `<p class="jobs-card-salary">Salario: ${escapeHtml(vacancy.salary)}</p>` : ""}
+        <ul class="jobs-card-facts">${facts}</ul>
+        <p class="jobs-card-salary">Salario: ${escapeHtml(displayValue(vacancy.salary))}</p>
         ${description}
+        ${requirements}
         <a class="jobs-card-action btn btn-primary" href="${escapeHtml(`${siteUrl}/empleos/${vacancy.slug}`)}"><span>Ver detalle</span><i class="fa-solid fa-arrow-right" aria-hidden="true"></i></a>
       </div>
     </div>
@@ -654,6 +783,7 @@ function renderFeaturedJobs(vacancies, env) {
     ? `<div class="row g-4">${featured.map((vacancy) => listingCard(vacancy, siteUrl)).join("")}</div>`
     : '<p class="card-premium">No hay vacantes vigentes para mostrar en este momento.</p>';
   return `<section class="section bg-soft home-jobs-section" aria-labelledby="home-jobs-title">
+    ${itemListJsonLd(featured, siteUrl)}
     <div class="container">
       <div class="row section-header align-items-end">
         <div class="col-lg-8">
@@ -697,11 +827,16 @@ function renderListing(request, env, vacancies, filters) {
   const filteredVacancies = vacancies.filter((vacancy) => {
     const searchableText = normalize([
       vacancy.title,
+      vacancy.company,
       vacancy.location,
       vacancy.salary,
+      vacancy.contractType,
+      vacancy.requirements?.join(" "),
+      vacancy.contactEmail,
+      vacancy.contactPhone,
       vacancy.aiText,
       vacancy.channelName,
-    ].join(" "));
+    ].filter((value) => !isUnavailable(value)).join(" "));
     const citySearchText = normalize(`${vacancy.location} ${vacancy.aiText}`);
     const publishedDate = dateKeyInBogota(vacancy.publishedAt);
     return (
@@ -743,7 +878,7 @@ function renderListing(request, env, vacancies, filters) {
   const emptyMessage = filtersApplied
     ? "No encontramos vacantes con esos filtros. <a href=\"/empleos\">Ver todas las vacantes</a>."
     : "No hay ofertas laborales vigentes por el momento. Vuelve pronto para consultar nuevas publicaciones.";
-  const cityOptions = [...new Set(vacancies.map((vacancy) => vacancy.location).filter(Boolean))]
+  const cityOptions = [...new Set(vacancies.map((vacancy) => vacancy.location).filter((value) => !isUnavailable(value)))]
     .sort((left, right) => left.localeCompare(right, "es"))
     .map((city) => `<option value="${escapeHtml(city)}"></option>`)
     .join("");
@@ -819,7 +954,8 @@ function renderListing(request, env, vacancies, filters) {
       description,
       canonical,
       body,
-      robots: filtersApplied || vacancies.length === 0 ? "noindex,follow" : "index,follow",
+      robots: filtersApplied ? "noindex,follow" : "index,follow",
+      structuredData: filtersApplied ? "" : itemListJsonLd(pageItems, siteUrl),
     }),
   );
 }
@@ -840,13 +976,20 @@ function renderDetail(request, env, vacancies, slug) {
   const image = vacancy.imageUrl
     ? `<img class="jobs-detail-image" src="${escapeHtml(vacancy.imageUrl)}" alt="${escapeHtml(vacancy.title)}" decoding="async" fetchpriority="high">`
     : `<img class="jobs-detail-image" src="${EMPLOYMENT_PLACEHOLDER_IMAGE}" alt="Imagen ilustrativa de una oportunidad laboral" decoding="async">`;
+  const company = displayValue(vacancy.company);
+  const location = displayValue(vacancy.location);
+  const salary = displayValue(vacancy.salary);
+  const contractType = displayValue(vacancy.contractType);
+  const contactLabel = displayValue(vacancy.contactLabel);
+  const contactValue = vacancy.contactUrl && !isUnavailable(contactLabel)
+    ? `<a href="${escapeHtml(vacancy.contactUrl)}" rel="nofollow noopener noreferrer" target="_blank">${escapeHtml(contactLabel)} <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i></a>`
+    : escapeHtml(contactLabel);
   const details = [
-    vacancy.location
-      ? `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-location-dot" aria-hidden="true"></i> Ubicación</dt><dd>${escapeHtml(vacancy.location)}</dd></div>`
-      : "",
-    vacancy.salary
-      ? `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-money-bill-wave" aria-hidden="true"></i> Salario</dt><dd>${escapeHtml(vacancy.salary)}</dd></div>`
-      : "",
+    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-building" aria-hidden="true"></i> Empresa</dt><dd>${escapeHtml(company)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-location-dot" aria-hidden="true"></i> Ubicación</dt><dd>${escapeHtml(location)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-money-bill-wave" aria-hidden="true"></i> Salario</dt><dd>${escapeHtml(salary)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-file-contract" aria-hidden="true"></i> Tipo de contrato</dt><dd>${escapeHtml(contractType)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-address-book" aria-hidden="true"></i> Contacto</dt><dd>${contactValue}</dd></div>`,
     `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-calendar-days" aria-hidden="true"></i> Fecha de publicación</dt><dd><time datetime="${escapeHtml(vacancy.publishedAt)}">${escapeHtml(formatDate(vacancy.publishedAt))}</time></dd></div>`,
     vacancy.channelName
       ? `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-bullhorn" aria-hidden="true"></i> Canal de origen</dt><dd>${escapeHtml(vacancy.channelName)}</dd></div>`
@@ -857,9 +1000,14 @@ function renderDetail(request, env, vacancies, slug) {
     : "";
   const whatsappUrl = escapeHtml(vacancyWhatsAppUrl(vacancy));
   const subtitle = [
-    vacancy.location ? `Empleo en ${escapeHtml(vacancy.location)}` : "",
+    !isUnavailable(company) ? company : "",
+    !isUnavailable(location) ? `Empleo en ${escapeHtml(location)}` : "",
     escapeHtml(formatDate(vacancy.publishedAt)),
   ].filter(Boolean).join(" · ");
+  const description = displayValue(vacancy.description, displayValue(vacancy.aiText));
+  const requirements = vacancy.requirements?.length
+    ? vacancy.requirements.map((requirement) => `• ${requirement}`).join("\n")
+    : NOT_AVAILABLE;
   const body = `<main class="jobs-detail-page">
     <div class="container jobs-detail-container">
       <nav aria-label="Ruta de navegación" class="jobs-detail-breadcrumb">
@@ -873,7 +1021,12 @@ function renderDetail(request, env, vacancies, slug) {
             <p class="jobs-detail-subtitle">${subtitle}</p>
           </header>
           <figure class="jobs-detail-visual">${image}</figure>
-          ${vacancy.aiText ? `<section class="jobs-detail-description"><h2>Descripción de la vacante</h2><p class="jobs-detail-copy" itemprop="description">${escapeHtml(vacancy.aiText)}</p></section>` : ""}
+          <section class="jobs-detail-description">
+            <h2>Descripción de la vacante</h2>
+            <p class="jobs-detail-copy" itemprop="description">${escapeHtml(description)}</p>
+            <h2>Requisitos</h2>
+            <p class="jobs-detail-copy">${escapeHtml(requirements)}</p>
+          </section>
         </article>
         <aside class="jobs-detail-sidebar" aria-label="Información de la vacante">
           <section class="jobs-detail-summary">
@@ -899,10 +1052,11 @@ function renderDetail(request, env, vacancies, slug) {
     request,
     layout({
       title: `${vacancy.title} | Empleo | Grupo Avitar`,
-      description: (vacancy.aiText || vacancy.title).slice(0, 155),
+      description: (isUnavailable(description) ? vacancy.title : description).slice(0, 155),
       canonical,
       image: vacancy.imageUrl,
       body,
+      structuredData: jobPostingJsonLd(vacancy, siteUrl),
     }),
   );
 }
@@ -1080,12 +1234,7 @@ export default {
             "Cache-Control": "no-store",
           });
         }
-        vacancies = await getVacancies(
-          env,
-          now,
-          { searchTerm: slugSearchTerms(slug) },
-          MAX_QUERY_ROWS,
-        );
+        vacancies = await getVacancies(env, now, {}, MAX_QUERY_ROWS);
       }
 
       if (isHomeRoute) {
@@ -1126,12 +1275,12 @@ export default {
 
 export {
   activeVacancies,
-  extractLocation,
-  extractSalary,
-  extractTitle,
+  displayValue,
   isPublicSupabaseKey,
   isServiceRoleKey,
   isVacancy,
+  parseJsonObject,
   resolveImageUrl,
   slugify,
+  vacancyJsonFromSources,
 };

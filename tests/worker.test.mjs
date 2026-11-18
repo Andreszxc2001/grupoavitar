@@ -3,13 +3,12 @@ import assert from "node:assert/strict";
 import worker from "../worker.mjs";
 import {
   activeVacancies,
-  extractLocation,
-  extractSalary,
-  extractTitle,
   isPublicSupabaseKey,
   isServiceRoleKey,
   isVacancy,
+  parseJsonObject,
   resolveImageUrl,
+  vacancyJsonFromSources,
 } from "../worker.mjs";
 
 const SUPABASE_URL = "https://example.supabase.co";
@@ -19,9 +18,23 @@ function publication(overrides = {}) {
   return {
     id: "12345678-1234-1234-1234-123456789abc",
     fecha_publicacion: "2026-11-14T12:00:00.000Z",
-    tipo: "imagen",
-    texto_ocr: "Se busca panadero artesanal. Ciudad: Santa Marta. Salario: $1.500.000. OCR_ONLY_TEXT_DO_NOT_RENDER",
-    texto_ia: "Cargo: Panadero artesanal\nUbicación: Santa Marta\nSalario: $1.500.000",
+    tipo: "json",
+    texto_ocr: "OCR_ONLY_TEXT_DO_NOT_RENDER",
+    texto_ia: {
+      cargo: "Panadero artesanal",
+      titulo: "Panadero artesanal",
+      empresa: "Vaz Perfumes",
+      salario: "$1.500.000",
+      contacto: {
+        link: "No disponible",
+        correo: "No disponible",
+        telefono: "No disponible",
+      },
+      ubicacion: "Santa Marta",
+      requisitos: ["Experiencia previa"],
+      descripcion: "Panadero artesanal con experiencia en Santa Marta.",
+      tipo_contrato: "Tiempo completo",
+    },
     imagen_url: "post/foto.jpg",
     canal_nombre: "Empleos",
     canal_url: "https://example.com/canal",
@@ -30,60 +43,93 @@ function publication(overrides = {}) {
   };
 }
 
-test("classifies explicit hiring posts, not job-seeker messages", () => {
+const VAZ_PERFUMES_JSON = `{
+  "cargo": "No disponible",
+  "titulo": "No disponible",
+  "empresa": "Vaz Perfumes",
+  "salario": "No disponible",
+  "contacto": {
+    "link": "No disponible",
+    "correo": "No disponible",
+    "telefono": "No disponible"
+  },
+  "ubicacion": "No disponible",
+  "requisitos": [
+    "No disponible"
+  ],
+  "descripcion": "Solicita nuestro catálogo de marcas de belleza, perfumes y productos originales como agua de perfume, cremas hidratantes y fragancias como Vanila, Victorias Secret y otras marcas de calidad. Enfocados en belleza, aroma y calidad que se siente.",
+  "tipo_contrato": "No disponible"
+}`;
+
+function jsonPublication(overrides = {}) {
+  return publication({
+    id: "11111111-1234-1234-1234-123456789abc",
+    tipo: "json",
+    texto_ocr: "",
+    texto_ia: VAZ_PERFUMES_JSON,
+    imagen_url: "",
+    canal_nombre: "Catálogos",
+    ...overrides,
+  });
+}
+
+function completeJsonPublication() {
+  return jsonPublication({
+    id: "22222222-1234-1234-1234-123456789abc",
+    texto_ia: JSON.stringify({
+      cargo: "Asesor de ventas",
+      titulo: "Asesor de ventas",
+      empresa: "Vaz Perfumes",
+      salario: "$1.200.000",
+      contacto: {
+        link: "https://wa.me/573019441676",
+        correo: "empleos@example.com",
+        telefono: "300 944 1676",
+      },
+      ubicacion: "Cali",
+      requisitos: ["Experiencia en ventas", "Disponibilidad inmediata"],
+      descripcion: "Atención a clientes y venta de perfumes y productos de belleza.",
+      tipo_contrato: "Tiempo completo",
+    }),
+  });
+}
+
+test("only publishes posts that include vacancy JSON", () => {
   assert.equal(isVacancy(publication()), true);
+  assert.equal(isVacancy(jsonPublication()), true);
   assert.equal(
     isVacancy(
       publication({
-        tipo: "texto",
         texto_ocr: "",
-        texto_ia:
-          "**Buscamos Auxiliar Operativo en Cartagena**\nFunciones: apoyo administrativo.\nRequisitos: experiencia previa. Enviar hoja de vida.",
-      }),
-    ),
-    true,
-  );
-  assert.equal(
-    isVacancy(
-      publication({
-        tipo: "imagen",
-        texto_ocr: "",
-        texto_ia: "**Oportunidad laboral: Ingeniero de Procesos**",
-      }),
-    ),
-    true,
-  );
-  assert.equal(
-    isVacancy(
-      publication({
-        tipo: "texto",
-        texto_ocr: "Busco empleo como panadero, tengo experiencia.",
-        texto_ia: "Persona busca trabajo como panadero.",
+        texto_ia: "**Buscamos Auxiliar Operativo en Cartagena**\nRequisitos: experiencia previa.",
       }),
     ),
     false,
   );
   assert.equal(
-    isVacancy(
-      publication({
-        tipo: "imagen",
-        texto_ocr: "Promoción de curso de panadería artesanal.",
-        texto_ia: "",
-      }),
-    ),
+    isVacancy(publication({ texto_ia: null, texto_ocr: "Busco empleo como panadero." })),
     false,
+  );
+  assert.equal(
+    isVacancy(publication({ texto_ia: "", texto_ocr: "Promoción de panadería artesanal." })),
+    false,
+  );
+  assert.deepEqual(
+    activeVacancies(
+      [publication({ texto_ia: "Vacante: Panadero artesanal", texto_ocr: "" })],
+      SUPABASE_URL,
+      NOW,
+    ),
+    [],
   );
 });
 
-test("extracts title, location, and salary only from source text or metadata", () => {
-  const post = publication();
-  assert.equal(extractTitle(post.texto_ia, post.texto_ocr), "Panadero artesanal");
-  assert.equal(extractTitle("**Vacante: Auxiliar de bodega**", ""), "Auxiliar de bodega");
-  assert.equal(extractLocation(post.texto_ia, {}), "Santa Marta");
-  assert.equal(extractSalary(post.texto_ia, {}), "$1.500.000");
-  assert.equal(extractLocation("Buscamos panadero", {}), "");
-  assert.equal(extractSalary("Buscamos panadero", {}), "");
-  assert.equal(extractLocation("", { city: "Cali" }), "Cali");
+test("reads vacancy fields from JSON data", () => {
+  const [vacancy] = activeVacancies([publication()], SUPABASE_URL, NOW);
+  assert.equal(vacancy.title, "Panadero artesanal");
+  assert.equal(vacancy.company, "Vaz Perfumes");
+  assert.equal(vacancy.location, "Santa Marta");
+  assert.equal(vacancy.salary, "$1.500.000");
 });
 
 test("keeps image URLs untransformed and resolves storage object paths", () => {
@@ -96,6 +142,34 @@ test("keeps image URLs untransformed and resolves storage object paths", () => {
     "https://cdn.example.com/original.jpg",
   );
   assert.equal(resolveImageUrl("javascript:alert(1)", SUPABASE_URL), "");
+});
+
+test("reads vacancy data from JSON posts and fills missing values with No disponible", () => {
+  const post = jsonPublication();
+  assert.equal(isVacancy(post), true);
+  assert.deepEqual(parseJsonObject(post.texto_ia)?.empresa, "Vaz Perfumes");
+  assert.equal(vacancyJsonFromSources(post.texto_ia)?.salario, "No disponible");
+
+  const [vacancy] = activeVacancies([post], SUPABASE_URL, NOW);
+  assert.equal(vacancy.slug, "vaz-perfumes-11111111");
+  assert.equal(vacancy.title, "No disponible");
+  assert.equal(vacancy.company, "Vaz Perfumes");
+  assert.equal(vacancy.location, "No disponible");
+  assert.equal(vacancy.salary, "No disponible");
+  assert.equal(vacancy.contractType, "No disponible");
+  assert.deepEqual(vacancy.requirements, ["No disponible"]);
+  assert.equal(vacancy.contactLabel, "No disponible");
+  assert.equal(vacancy.contactUrl, "");
+  assert.match(vacancy.description, /catálogo de marcas de belleza/);
+
+  const [complete] = activeVacancies([completeJsonPublication()], SUPABASE_URL, NOW);
+  assert.equal(complete.slug, "asesor-de-ventas-cali-22222222");
+  assert.equal(complete.salary, "$1.200.000");
+  assert.equal(complete.contractType, "Tiempo completo");
+  assert.deepEqual(complete.requirements, ["Experiencia en ventas", "Disponibilidad inmediata"]);
+  assert.equal(complete.contactEmail, "empleos@example.com");
+  assert.equal(complete.contactPhone, "300 944 1676");
+  assert.match(complete.contactUrl, /^https:\/\/wa\.me\//);
 });
 
 test("includes only current publications and deduplicates identical source text", () => {
@@ -150,9 +224,23 @@ test("renders listings and job detail as server HTML with canonical metadata", a
         id: "aaaaaaaa-1234-1234-1234-123456789abc",
         fecha_publicacion: "2026-11-13T12:00:00.000Z",
         imagen_url: "",
-        texto_ocr: "Se busca auxiliar de bodega.",
-        texto_ia: "Vacante: Auxiliar de bodega\nFunciones: apoyo en inventario.",
-        metadata: { city: "Cartagena" },
+        texto_ocr: "OCR_ONLY_TEXT_DO_NOT_RENDER",
+        texto_ia: {
+          cargo: "Auxiliar de bodega",
+          titulo: "Auxiliar de bodega",
+          empresa: "Vaz Perfumes",
+          salario: "No disponible",
+          contacto: {
+            link: "No disponible",
+            correo: "No disponible",
+            telefono: "No disponible",
+          },
+          ubicacion: "Cartagena",
+          requisitos: ["Disponibilidad inmediata"],
+          descripcion: "Apoyo en inventario.",
+          tipo_contrato: "No disponible",
+        },
+        metadata: {},
       }),
     ]), {
       headers: { "Content-Type": "application/json" },
@@ -303,10 +391,24 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
     const number = index + 1;
     return publication({
       id: `${String(number).padStart(8, "0")}-1234-1234-1234-123456789abc`,
-      texto_ocr: `Vacante para auxiliar número ${number}.`,
-      texto_ia: `Vacante: Auxiliar ${number}\nRequisitos: disponibilidad inmediata.`,
+      texto_ocr: "OCR_ONLY_TEXT_DO_NOT_RENDER",
+      texto_ia: {
+        cargo: `Auxiliar ${number}`,
+        titulo: `Auxiliar ${number}`,
+        empresa: "Vaz Perfumes",
+        salario: "No disponible",
+        contacto: {
+          link: "No disponible",
+          correo: "No disponible",
+          telefono: "No disponible",
+        },
+        ubicacion: "Cali",
+        requisitos: ["Disponibilidad inmediata"],
+        descripcion: `Auxiliar ${number} con disponibilidad inmediata.`,
+        tipo_contrato: "No disponible",
+      },
       imagen_url: "",
-      metadata: { city: "Cali" },
+      metadata: {},
     });
   });
   let supabaseReads = 0;
@@ -320,8 +422,8 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
     const orFilters = query.searchParams.getAll("or");
     const matches = posts.filter((post) => orFilters.every((filter) => {
       const patterns = [...filter.matchAll(/ilike\.\*([^*]+)\*/g)].map((match) => match[1]);
-      return patterns.some((pattern) => [post.texto_ia, post.texto_ocr, post.canal_nombre]
-        .some((value) => value.toLowerCase().includes(pattern)));
+      return patterns.some((pattern) => [JSON.stringify(post.texto_ia), post.texto_ocr, post.canal_nombre]
+        .some((value) => String(value).toLowerCase().includes(pattern)));
     }));
     return new Response(JSON.stringify(matches.slice(offset, offset + limit)), {
       headers: { "Content-Type": "application/json" },
@@ -442,6 +544,98 @@ test("separates cached anonymous reads from service-role reads", async () => {
     );
     assert.match(await servicePage.text(), /class="col-md-6 col-xl-4"/);
     assert.equal(supabaseReads, 2);
+  } finally {
+    globalThis.caches = previousCache;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("renders JSON vacancy data in the home, listing and detail server HTML", async () => {
+  const previousCache = globalThis.caches;
+  const previousFetch = globalThis.fetch;
+  const cache = new Map();
+  globalThis.caches = {
+    default: {
+      match: async (request) => cache.get(request.url)?.clone(),
+      put: async (request, response) => cache.set(request.url, response.clone()),
+    },
+  };
+  const textFilteredQueries = [];
+  globalThis.fetch = async (requestUrl) => {
+    const query = new URL(String(requestUrl));
+    if (query.searchParams.has("or")) textFilteredQueries.push(query.search);
+    return new Response(
+      JSON.stringify([jsonPublication(), completeJsonPublication()]),
+      { headers: { "Content-Type": "application/json" } },
+    );
+  };
+
+  try {
+    const env = {
+      SUPABASE_URL,
+      SUPABASE_SERVICE_ROLE_KEY: `header.${Buffer.from(JSON.stringify({ role: "service_role" })).toString("base64url")}.signature`,
+      SITE_URL: "https://grupoavitar.com",
+      ASSETS: {
+        fetch: async () => new Response(
+          "<!doctype html><html><head></head><body><!-- FEATURED_JOBS --></body></html>",
+          { headers: { "Content-Type": "text/html; charset=utf-8" } },
+        ),
+      },
+    };
+
+    const listing = await worker.fetch(new Request("https://grupoavitar.com/empleos"), env);
+    const listingHtml = await listing.text();
+    assert.equal(listing.status, 200);
+    assert.equal((listingHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 2);
+    assert.match(listingHtml, /Empresa:<\/strong> Vaz Perfumes/);
+    assert.match(listingHtml, /Ubicación:<\/strong> No disponible/);
+    assert.match(listingHtml, /Contrato:<\/strong> No disponible/);
+    assert.match(listingHtml, /Contacto:<\/strong> No disponible/);
+    assert.match(listingHtml, /Salario: No disponible/);
+    assert.match(listingHtml, /Salario: \$1\.200\.000/);
+    assert.match(listingHtml, /Requisitos:<\/strong> No disponible/);
+    assert.match(listingHtml, /Requisitos:<\/strong> Experiencia en ventas/);
+    assert.match(listingHtml, /"@type":"ItemList"/);
+    assert.match(listingHtml, /<meta name="robots" content="index,follow">/);
+
+    const detail = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/vaz-perfumes-11111111"),
+      env,
+    );
+    const detailHtml = await detail.text();
+    assert.equal(detail.status, 200);
+    assert.match(detailHtml, /<h1 class="jobs-detail-title" itemprop="headline">No disponible<\/h1>/);
+    assert.match(detailHtml, /Empresa<\/dt><dd>Vaz Perfumes/);
+    assert.match(detailHtml, /Ubicación<\/dt><dd>No disponible/);
+    assert.match(detailHtml, /Salario<\/dt><dd>No disponible/);
+    assert.match(detailHtml, /Tipo de contrato<\/dt><dd>No disponible/);
+    assert.match(detailHtml, /Contacto<\/dt><dd>No disponible/);
+    assert.match(detailHtml, /Requisitos<\/h2>\s*<p class="jobs-detail-copy">• No disponible/);
+    assert.match(detailHtml, /catálogo de marcas de belleza/);
+    assert.doesNotMatch(detailHtml, /"@type":"JobPosting"/);
+
+    const completeDetail = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/asesor-de-ventas-cali-22222222"),
+      env,
+    );
+    const completeHtml = await completeDetail.text();
+    assert.equal(completeDetail.status, 200);
+    assert.match(completeHtml, /Salario<\/dt><dd>\$1\.200\.000/);
+    assert.match(completeHtml, /Tipo de contrato<\/dt><dd>Tiempo completo/);
+    assert.match(completeHtml, /300 944 1676/);
+    assert.match(completeHtml, /href="https:\/\/wa\.me\/573019441676"/);
+    assert.match(completeHtml, /"@type":"JobPosting"/);
+    assert.match(completeHtml, /"employmentType":"FULL_TIME"/);
+
+    const home = await worker.fetch(new Request("https://grupoavitar.com/"), env);
+    const homeHtml = await home.text();
+    assert.equal(home.status, 200);
+    assert.equal((homeHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 2);
+    assert.match(homeHtml, /Vaz Perfumes/);
+    assert.match(homeHtml, /Salario: No disponible/);
+    assert.match(homeHtml, /"@type":"ItemList"/);
+    assert.doesNotMatch(homeHtml, /FEATURED_JOBS/);
+    assert.deepEqual(textFilteredQueries, []);
   } finally {
     globalThis.caches = previousCache;
     globalThis.fetch = previousFetch;
