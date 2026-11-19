@@ -437,7 +437,7 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
       SITE_URL: "https://grupoavitar.com",
       ASSETS: {
         fetch: async () => new Response(
-          "<!doctype html><html><body><!-- FEATURED_JOBS --></body></html>",
+          "<!doctype html><html><head><!-- HOME_SEO --></head><body><!-- FEATURED_JOBS --></body></html>",
           { headers: { "Content-Type": "text/html; charset=utf-8" } },
         ),
       },
@@ -447,7 +447,7 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
     assert.equal(listing.status, 200);
     assert.equal((listingHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 50);
     assert.match(listingHtml, /Mostrando 50 en esta página/);
-    assert.deepEqual(requestedLimits[0], { limit: 50, offset: 0 });
+    assert.deepEqual(requestedLimits[0], { limit: 100, offset: 0 });
 
     const secondPage = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?page=2"),
@@ -491,7 +491,12 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
     assert.equal((homepageHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 12);
     assert.match(homepageHtml, /Auxiliar 12/);
     assert.doesNotMatch(homepageHtml, /Auxiliar 13/);
-    assert.doesNotMatch(homepageHtml, /FEATURED_JOBS/);
+    assert.match(homepageHtml, /<form class="home-jobs-search" action="\/empleos" method="get" role="search">/);
+    assert.match(homepageHtml, /<strong>51<\/strong> vacantes disponibles/);
+    assert.match(homepageHtml, /"@type":"WebSite"/);
+    assert.match(homepageHtml, /"@type":"SearchAction"/);
+    assert.match(homepageHtml, /empleos\?q=\{search_term_string\}/);
+    assert.doesNotMatch(homepageHtml, /FEATURED_JOBS|HOME_SEO/);
     assert.ok(supabaseReads >= 5);
   } finally {
     globalThis.caches = previousCache;
@@ -577,7 +582,7 @@ test("renders JSON vacancy data in the home, listing and detail server HTML", as
       SITE_URL: "https://grupoavitar.com",
       ASSETS: {
         fetch: async () => new Response(
-          "<!doctype html><html><head></head><body><!-- FEATURED_JOBS --></body></html>",
+          "<!doctype html><html><head><!-- HOME_SEO --></head><body><!-- FEATURED_JOBS --></body></html>",
           { headers: { "Content-Type": "text/html; charset=utf-8" } },
         ),
       },
@@ -634,7 +639,11 @@ test("renders JSON vacancy data in the home, listing and detail server HTML", as
     assert.match(homeHtml, /Vaz Perfumes/);
     assert.match(homeHtml, /Salario: No disponible/);
     assert.match(homeHtml, /"@type":"ItemList"/);
-    assert.doesNotMatch(homeHtml, /FEATURED_JOBS/);
+    assert.match(homeHtml, /<form class="home-jobs-search" action="\/empleos" method="get" role="search">/);
+    assert.match(homeHtml, /<strong>2<\/strong> vacantes disponibles/);
+    assert.match(homeHtml, /"@type":"WebSite"/);
+    assert.match(homeHtml, /"@type":"SearchAction"/);
+    assert.doesNotMatch(homeHtml, /FEATURED_JOBS|HOME_SEO/);
     assert.deepEqual(textFilteredQueries, []);
   } finally {
     globalThis.caches = previousCache;

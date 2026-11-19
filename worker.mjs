@@ -27,6 +27,7 @@ const EMPLOYMENT_TYPE_MAP = {
 };
 const WHATSAPP_PHONE = "573019441676";
 const FEATURED_JOBS_MARKER = "<!-- FEATURED_JOBS -->";
+const HOME_SEO_MARKER = "<!-- HOME_SEO -->";
 const PUBLICATION_FIELDS = [
   "id",
   "canal_nombre",
@@ -422,15 +423,17 @@ async function getPublicationRows(env, now, options = {}) {
 
 async function getVacancies(env, now, options = {}, maxVacancies = PAGE_SIZE) {
   const rows = [];
+  let vacancies = [];
   let offset = 0;
-  while (rows.length < maxVacancies && offset < MAX_QUERY_ROWS) {
-    const limit = Math.min(QUERY_BATCH_SIZE, MAX_QUERY_ROWS - offset, maxVacancies);
+  while (offset < MAX_QUERY_ROWS && vacancies.length < maxVacancies) {
+    const limit = Math.min(QUERY_BATCH_SIZE, MAX_QUERY_ROWS - offset);
     const page = await getPublicationRows(env, now, { ...options, limit, offset });
     rows.push(...page);
+    vacancies = activeVacancies(rows, env.SUPABASE_URL, now);
     if (page.length < limit) break;
     offset += limit;
   }
-  return activeVacancies(rows, env.SUPABASE_URL, now);
+  return vacancies.slice(0, maxVacancies);
 }
 
 function responseHeaders(contentType, extra = {}) {
@@ -689,6 +692,46 @@ function jsonLd(schema) {
   return `<script type="application/ld+json">${JSON.stringify(schema).replace(/</g, "\\u003c")}</script>`;
 }
 
+function homeSeoJsonLd(siteUrl) {
+  return jsonLd({
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": `${siteUrl}/#organization`,
+        name: "Grupo Avitar",
+        url: siteUrl,
+        logo: `${siteUrl}/assets/img/logo.png`,
+      },
+      {
+        "@type": "WebSite",
+        "@id": `${siteUrl}/#website`,
+        url: siteUrl,
+        name: "Grupo Avitar",
+        inLanguage: "es",
+        publisher: { "@id": `${siteUrl}/#organization` },
+        potentialAction: {
+          "@type": "SearchAction",
+          target: {
+            "@type": "EntryPoint",
+            urlTemplate: `${siteUrl}/empleos?q={search_term_string}`,
+          },
+          "query-input": "required name=search_term_string",
+        },
+      },
+      {
+        "@type": "WebPage",
+        "@id": `${siteUrl}/#webpage`,
+        url: siteUrl,
+        name: "Grupo Avitar — Documentación Laboral y Profesional",
+        isPartOf: { "@id": `${siteUrl}/#website` },
+        about: { "@id": `${siteUrl}/#organization` },
+        inLanguage: "es",
+      },
+    ],
+  });
+}
+
 function itemListJsonLd(vacancies, siteUrl) {
   if (!vacancies.length) return "";
   return jsonLd({
@@ -779,22 +822,43 @@ function listingCard(vacancy, siteUrl) {
 function renderFeaturedJobs(vacancies, env) {
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
   const featured = vacancies.slice(0, FEATURED_LIMIT);
+  const total = vacancies.length;
   const content = featured.length
     ? `<div class="row g-4">${featured.map((vacancy) => listingCard(vacancy, siteUrl)).join("")}</div>`
     : '<p class="card-premium">No hay vacantes vigentes para mostrar en este momento.</p>';
   return `<section class="section bg-soft home-jobs-section" aria-labelledby="home-jobs-title">
     ${itemListJsonLd(featured, siteUrl)}
     <div class="container">
-      <div class="row section-header align-items-end">
-        <div class="col-lg-8">
-          <span class="eyebrow">Oportunidades recientes</span>
-          <h2 class="section-title" id="home-jobs-title">Vacantes disponibles</h2>
-          <p class="section-subtitle">Explora empleos publicados recientemente y encuentra una oportunidad para ti.</p>
+      <div class="section-header">
+        <span class="eyebrow">Oportunidades recientes</span>
+        <h2 class="section-title" id="home-jobs-title">Vacantes disponibles</h2>
+        <p class="section-subtitle">Explora empleos publicados recientemente y encuentra una oportunidad para ti.</p>
+      </div>
+      <div class="home-jobs-toolbar">
+        <div class="home-jobs-search-copy">
+          <span class="home-jobs-search-icon"><i class="fa-solid fa-briefcase" aria-hidden="true"></i></span>
+          <div>
+            <h3>Encuentra tu próxima oportunidad</h3>
+            <p>Busca entre las vacantes activas por cargo, empresa o palabra clave.</p>
+          </div>
         </div>
+        <form class="home-jobs-search" action="/empleos" method="get" role="search">
+          <div class="home-jobs-search-field">
+            <label class="visually-hidden" for="home-jobs-search-input">Buscar vacantes por palabra clave</label>
+            <i class="fa-solid fa-magnifying-glass home-jobs-search-field-icon" aria-hidden="true"></i>
+            <input id="home-jobs-search-input" class="form-control" type="search" name="q" placeholder="Ej. auxiliar, ventas, Bogotá..." maxlength="100">
+          </div>
+          <button class="btn btn-primary" type="submit">Buscar <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></button>
+        </form>
+        <span class="home-jobs-count"><strong>${total}</strong> ${total === 1 ? "vacante disponible" : "vacantes disponibles"}<small class="d-block fw-normal">Publicadas y vigentes</small></span>
+      </div>
+      <div class="home-jobs-results-head">
+        <h3>Vacantes destacadas</h3>
+        <span><i class="fa-solid fa-bolt" aria-hidden="true"></i> Actualizadas constantemente</span>
       </div>
       ${content}
-      <div class="mt-5">
-        <a class="btn btn-primary" href="/empleos">Ver todas las vacantes <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></a>
+      <div class="mt-5 text-center">
+        <a class="btn btn-primary btn-lg" href="/empleos">Ver todas las vacantes <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></a>
       </div>
     </div>
   </section>`;
@@ -1216,9 +1280,9 @@ export default {
 
       let vacancies = [];
       if (isHomeRoute) {
-        vacancies = await getVacancies(env, now, {}, FEATURED_LIMIT);
+        vacancies = await getVacancies(env, now, {}, MAX_QUERY_ROWS);
       } else if (url.pathname === "/sitemap.xml") {
-        vacancies = await getVacancies(env, now, {}, PAGE_SIZE);
+        vacancies = await getVacancies(env, now, {}, MAX_QUERY_ROWS);
       } else if (filters) {
         vacancies = await getVacancies(
           env,
@@ -1241,8 +1305,11 @@ export default {
         const assetResponse = await env.ASSETS.fetch(request);
         if (!assetResponse.ok) return assetResponse;
         const homeHtml = await assetResponse.text();
-        if (homeHtml.split(FEATURED_JOBS_MARKER).length !== 2) {
-          throw new Error("No se encontró el espacio de vacantes destacadas en index.html.");
+        if (
+          homeHtml.split(FEATURED_JOBS_MARKER).length !== 2 ||
+          homeHtml.split(HOME_SEO_MARKER).length !== 2
+        ) {
+          throw new Error("No se encontraron los espacios de empleos o SEO en index.html.");
         }
         const headers = new Headers(assetResponse.headers);
         headers.delete("Content-Length");
@@ -1250,8 +1317,11 @@ export default {
         headers.delete("ETag");
         headers.set("Content-Type", "text/html; charset=utf-8");
         headers.set("Cache-Control", "public, max-age=60, s-maxage=60");
+        const siteUrl = env.SITE_URL.replace(/\/+$/, "");
         return new Response(
-          homeHtml.replace(FEATURED_JOBS_MARKER, renderFeaturedJobs(vacancies, env)),
+          homeHtml
+            .replace(HOME_SEO_MARKER, homeSeoJsonLd(siteUrl))
+            .replace(FEATURED_JOBS_MARKER, renderFeaturedJobs(vacancies, env)),
           { status: assetResponse.status, headers },
         );
       }
