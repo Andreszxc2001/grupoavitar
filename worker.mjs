@@ -2,8 +2,11 @@ const PAGE_SIZE = 50;
 const QUERY_BATCH_SIZE = 100;
 const MAX_QUERY_ROWS = 1000;
 const FEATURED_LIMIT = 12;
-const PUBLICATION_DAYS = 20;
-const EMPLOYMENT_PLACEHOLDER_IMAGE = "/assets/img/empleo-placeholder.svg";
+const PUBLICATION_DAYS = 15;
+const CLEANUP_IMAGE_TIMEOUT_MS = 5000;
+const CLEANUP_IMAGE_CONCURRENCY = 10;
+const CLEANUP_DELETE_BATCH = 100;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NOT_AVAILABLE = "No disponible";
 const VACANCY_JSON_KEYS = [
   "cargo",
@@ -304,7 +307,7 @@ function activeVacancies(publications, supabaseUrl, now = new Date()) {
       continue;
     }
     const vacancy = publicationToVacancy(publication, supabaseUrl);
-    if (!vacancy || seen.has(vacancy.duplicateKey)) continue;
+    if (!vacancy || !vacancy.imageUrl || seen.has(vacancy.duplicateKey)) continue;
     seen.add(vacancy.duplicateKey);
     vacancies.push(vacancy);
   }
@@ -445,6 +448,132 @@ async function getVacancies(env, now, options = {}, maxVacancies = PAGE_SIZE) {
   return vacancies.slice(0, maxVacancies);
 }
 
+function cleanupQueryUrl(env, cutoff, olderThan) {
+  const url = new URL("/rest/v1/canales_publicaciones", env.SUPABASE_URL);
+  url.searchParams.set("select", PUBLICATION_FIELDS);
+  url.searchParams.set("fecha_publicacion", olderThan ? `lte.${cutoff}` : `gt.${cutoff}`);
+  url.searchParams.set("order", "fecha_publicacion.desc");
+  url.searchParams.set("limit", String(MAX_QUERY_ROWS));
+  return url;
+}
+
+async function fetchCleanupRows(env, cutoff, olderThan) {
+  const apiKey = supabaseReadKey(env);
+  if (!apiKey) throw new Error("No hay una clave válida de solo lectura configurada.");
+  const response = await fetch(cleanupQueryUrl(env, cutoff, olderThan), {
+    headers: {
+      apikey: apiKey,
+      Authorization: `Bearer ${apiKey}`,
+    },
+  });
+  if (!response.ok) {
+    console.error("Supabase cleanup read failed", response.status);
+    throw new Error("No fue posible consultar las publicaciones para la limpieza.");
+  }
+  const rows = await response.json();
+  if (!Array.isArray(rows)) throw new Error("Respuesta inválida de Supabase.");
+  return rows;
+}
+
+async function imageExists(url) {
+  try {
+    const response = await fetch(url, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(CLEANUP_IMAGE_TIMEOUT_MS),
+    });
+    if (response.ok) return true;
+    if (response.status === 405 || response.status === 501) {
+      const fallback = await fetch(url, {
+        headers: { Range: "bytes=0-0" },
+        signal: AbortSignal.timeout(CLEANUP_IMAGE_TIMEOUT_MS),
+      });
+      if (fallback.ok) return true;
+      return fallback.status === 404 || fallback.status === 410 ? false : null;
+    }
+    return response.status === 404 || response.status === 410 ? false : null;
+  } catch {
+    return null;
+  }
+}
+
+async function deletePublicationIds(env, ids) {
+  const key = env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!isServiceRoleKey(key)) {
+    throw new Error("Se requiere SUPABASE_SERVICE_ROLE_KEY para eliminar publicaciones.");
+  }
+  const url = new URL("/rest/v1/canales_publicaciones", env.SUPABASE_URL);
+  url.searchParams.set("id", `in.(${ids.join(",")})`);
+  const response = await fetch(url, {
+    method: "DELETE",
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      Prefer: "return=minimal",
+    },
+  });
+  if (!response.ok) {
+    console.error("Supabase cleanup delete failed", response.status);
+    throw new Error("No fue posible eliminar las publicaciones vencidas.");
+  }
+}
+
+async function runCleanup(env, now = new Date()) {
+  if (!validEnvironment(env)) throw new Error("Configuración del Worker incompleta.");
+  if (!isServiceRoleKey(env.SUPABASE_SERVICE_ROLE_KEY)) {
+    console.warn("Limpieza omitida: SUPABASE_SERVICE_ROLE_KEY no válida.");
+    return { deleted: [], reasons: {}, skipped: true };
+  }
+
+  const cutoff = new Date(now.getTime() - PUBLICATION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const [oldRows, recentRows] = await Promise.all([
+    fetchCleanupRows(env, cutoff, true),
+    fetchCleanupRows(env, cutoff, false),
+  ]);
+
+  const reasons = new Map();
+  const addForDeletion = (row, reason) => {
+    const id = text(row.id);
+    if (UUID_PATTERN.test(id)) reasons.set(id, reason);
+  };
+
+  for (const row of oldRows) {
+    if (isVacancy(row)) addForDeletion(row, `antigua (${text(row.fecha_publicacion)})`);
+  }
+
+  const imageCandidates = [];
+  for (const row of recentRows) {
+    if (!isVacancy(row)) continue;
+    const id = text(row.id);
+    if (!UUID_PATTERN.test(id) || reasons.has(id)) continue;
+    const vacancy = publicationToVacancy(row, env.SUPABASE_URL);
+    if (!vacancy?.imageUrl) {
+      addForDeletion(row, "sin imagen");
+      continue;
+    }
+    imageCandidates.push({ id, imageUrl: vacancy.imageUrl });
+  }
+
+  for (let index = 0; index < imageCandidates.length; index += CLEANUP_IMAGE_CONCURRENCY) {
+    const batch = imageCandidates.slice(index, index + CLEANUP_IMAGE_CONCURRENCY);
+    const results = await Promise.all(batch.map((item) => imageExists(item.imageUrl)));
+    batch.forEach((item, position) => {
+      if (results[position] === false) {
+        reasons.set(item.id, `imagen no encontrada (${item.imageUrl})`);
+      }
+    });
+  }
+
+  const ids = [...reasons.keys()];
+  for (const id of ids) {
+    console.log(`[limpieza] Eliminar vacante ${id}: ${reasons.get(id)}`);
+  }
+  for (let index = 0; index < ids.length; index += CLEANUP_DELETE_BATCH) {
+    await deletePublicationIds(env, ids.slice(index, index + CLEANUP_DELETE_BATCH));
+  }
+  console.log(`[limpieza] ${ids.length} vacantes eliminadas.`);
+  return { deleted: ids, reasons: Object.fromEntries(reasons), skipped: false };
+}
+
 function responseHeaders(contentType, extra = {}) {
   return {
     "Content-Type": contentType,
@@ -492,6 +621,13 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
   <link rel="shortcut icon" href="/assets/favicon/favicon.ico">
   <meta name="msapplication-TileColor" content="#004AAD">
   <meta name="theme-color" content="#004AAD">
+  <!-- Google Tag Manager -->
+  <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+  new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+  j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+  'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+  })(window,document,'script','dataLayer','GTM-WML4WJG8');</script>
+  <!-- End Google Tag Manager -->
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-29YCBD5TL9"></script>
   <script>
     window.dataLayer = window.dataLayer || [];
@@ -565,6 +701,8 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
     .jobs-whatsapp-button:hover { border-color: #187c42; background: #187c42; color: #fff; }
     .jobs-detail-cta-copy { margin: 0; color: var(--n-slate); font-size: .88rem; line-height: 1.55; }
     .jobs-detail-page { background: #f7f9fc; }
+    .jobs-detail-unavailable { padding: 4rem 1rem; text-align: center; }
+    .jobs-detail-unavailable h1 { margin-bottom: .75rem; color: var(--n-navy); font-size: 1.6rem; }
     .jobs-detail-container { padding-top: 2rem; padding-bottom: 4rem; }
     .jobs-detail-breadcrumb { margin-bottom: 1.5rem; color: var(--n-slate); font-size: .9rem; }
     .jobs-detail-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(280px, .72fr); gap: 1.5rem; align-items: start; }
@@ -598,6 +736,10 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
   </style>
 </head>
 <body>
+  <!-- Google Tag Manager (noscript) -->
+  <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-WML4WJG8"
+  height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+  <!-- End Google Tag Manager (noscript) -->
   <nav class="navbar navbar-expand-lg navbar-nexora fixed-top jobs-nav">
     <div class="container">
       <a class="navbar-brand navbar-brand-custom d-flex align-items-center" href="/">
@@ -670,13 +812,18 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
   <script src="/assets/js/main.js"></script>
   ${analyticsData ? `<script>
     (function () {
-      if (typeof gtag !== "function") return;
+      window.dataLayer = window.dataLayer || [];
       var vacancy = ${serializeForScript(analyticsData)};
-      gtag("event", "view_vacancy", vacancy);
+      function pushToDataLayer(name) {
+        window.dataLayer.push(Object.assign({ event: name }, vacancy));
+      }
+      if (typeof gtag === "function") gtag("event", "view_vacancy", vacancy);
+      pushToDataLayer("view_vacancy");
       var cta = document.getElementById("vacancy-whatsapp-cta");
       if (cta) {
         cta.addEventListener("click", function () {
-          gtag("event", "vacancy_whatsapp_click", vacancy);
+          if (typeof gtag === "function") gtag("event", "vacancy_whatsapp_click", vacancy);
+          pushToDataLayer("vacancy_whatsapp_click");
         });
       }
     })();
@@ -808,9 +955,7 @@ function jobPostingJsonLd(vacancy, siteUrl) {
 }
 
 function listingCard(vacancy, siteUrl) {
-  const image = vacancy.imageUrl
-    ? `<img src="${escapeHtml(vacancy.imageUrl)}" alt="${escapeHtml(vacancy.title)}" loading="lazy" decoding="async">`
-    : `<img src="${EMPLOYMENT_PLACEHOLDER_IMAGE}" alt="Imagen ilustrativa de una oportunidad laboral" loading="lazy" decoding="async">`;
+  const image = `<img src="${escapeHtml(vacancy.imageUrl)}" alt="${escapeHtml(vacancy.title)}" loading="lazy" decoding="async">`;
   const aiText = displayValue(vacancy.aiText, "");
   const description = aiText
     ? `<p class="jobs-card-description">${escapeHtml(aiText.slice(0, 320))}${aiText.length > 320 ? "…" : ""}</p>`
@@ -978,7 +1123,7 @@ function renderListing(request, env, vacancies, filters) {
             <p>Vacantes compartidas por los canales de origen, con información publicada recientemente.</p>
             <div class="jobs-hero-stats">
               <div class="jobs-hero-count"><strong>${filteredVacancies.length}</strong><span>${filtersApplied ? "resultados encontrados" : filteredVacancies.length === 1 ? "vacante activa" : "vacantes activas"}</span></div>
-              <span class="jobs-validity">Cada publicación se mantiene durante 20 días</span>
+              <span class="jobs-validity">Cada publicación se mantiene durante 15 días</span>
             </div>
           </div>
           <div class="col-lg-5">
@@ -1059,9 +1204,7 @@ function renderDetail(request, env, vacancies, slug) {
 
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
   const canonical = `${siteUrl}/empleos/${vacancy.slug}`;
-  const image = vacancy.imageUrl
-    ? `<img class="jobs-detail-image" src="${escapeHtml(vacancy.imageUrl)}" alt="${escapeHtml(vacancy.title)}" decoding="async" fetchpriority="high">`
-    : `<img class="jobs-detail-image" src="${EMPLOYMENT_PLACEHOLDER_IMAGE}" alt="Imagen ilustrativa de una oportunidad laboral" decoding="async">`;
+  const image = `<img class="jobs-detail-image" src="${escapeHtml(vacancy.imageUrl)}" alt="${escapeHtml(vacancy.title)}" decoding="async" fetchpriority="high">`;
   const company = displayValue(vacancy.company);
   const location = displayValue(vacancy.location);
   const salary = displayValue(vacancy.salary);
@@ -1095,6 +1238,10 @@ function renderDetail(request, env, vacancies, slug) {
     ? vacancy.requirements.map((requirement) => `• ${requirement}`).join("\n")
     : NOT_AVAILABLE;
   const body = `<main class="jobs-detail-page">
+    <div id="vacancy-image-unavailable" class="jobs-detail-unavailable" hidden>
+      <h1>Esta oferta ya no está disponible</h1>
+      <p>La imagen de esta vacante no está disponible. <a href="/empleos">Ver ofertas vigentes</a></p>
+    </div>
     <div class="container jobs-detail-container">
       <nav aria-label="Ruta de navegación" class="jobs-detail-breadcrumb">
         <a href="/">Inicio</a> <span aria-hidden="true">/</span> <a href="/empleos">Empleos</a> <span aria-hidden="true">/</span> <span aria-current="page">${escapeHtml(vacancy.title)}</span>
@@ -1127,7 +1274,7 @@ function renderDetail(request, env, vacancies, slug) {
           </section>
           <section class="jobs-detail-note">
             <strong>Información importante</strong>
-            <p>Este portal es informativo. La oferta puede haber cerrado o cambiado; confirma su disponibilidad directamente con el empleador o en el canal original antes de postularte. La publicación puede permanecer aquí hasta 20 días desde su fecha de origen.</p>
+            <p>Este portal es informativo. La oferta puede haber cerrado o cambiado; confirma su disponibilidad directamente con el empleador o en el canal original antes de postularte. La publicación puede permanecer aquí hasta 15 días desde su fecha de origen.</p>
             <a href="/terminos">Leer Términos y Condiciones</a>
           </section>
         </aside>
@@ -1369,6 +1516,9 @@ export default {
       });
     }
   },
+  async scheduled(controller, env, ctx) {
+    await runCleanup(env, new Date(controller.scheduledTime));
+  },
 };
 
 export {
@@ -1379,6 +1529,7 @@ export {
   isVacancy,
   parseJsonObject,
   resolveImageUrl,
+  runCleanup,
   slugify,
   vacancyJsonFromSources,
 };

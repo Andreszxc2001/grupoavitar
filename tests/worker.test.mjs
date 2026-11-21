@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import worker from "../worker.mjs";
 import {
   activeVacancies,
@@ -8,6 +9,7 @@ import {
   isVacancy,
   parseJsonObject,
   resolveImageUrl,
+  runCleanup,
   vacancyJsonFromSources,
 } from "../worker.mjs";
 
@@ -67,7 +69,7 @@ function jsonPublication(overrides = {}) {
     tipo: "json",
     texto_ocr: "",
     texto_ia: VAZ_PERFUMES_JSON,
-    imagen_url: "",
+    imagen_url: "post/catalogo.jpg",
     canal_nombre: "Catálogos",
     ...overrides,
   });
@@ -193,6 +195,31 @@ test("includes only current publications and deduplicates identical source text"
   assert.equal(jobs[0].salary, "$1.500.000");
 });
 
+test("keeps vacancies up to 15 days old and hides older ones", () => {
+  const within = publication({
+    id: "dddddddd-1234-1234-1234-123456789abc",
+    fecha_publicacion: "2026-10-31T12:00:01.000Z",
+  });
+  const older = publication({
+    id: "eeeeeeee-1234-1234-1234-123456789abc",
+    fecha_publicacion: "2026-10-31T11:59:59.999Z",
+  });
+  const jobs = activeVacancies([within, older], SUPABASE_URL, NOW);
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].id, within.id);
+});
+
+test("hides vacancies without a valid image", () => {
+  const jobs = activeVacancies([
+    publication({ id: "ffffffff-1234-1234-1234-123456789abc", imagen_url: "" }),
+    publication({
+      id: "11111111-2222-3333-4444-555555555555",
+      imagen_url: "javascript:alert(1)",
+    }),
+  ], SUPABASE_URL, NOW);
+  assert.deepEqual(jobs, []);
+});
+
 test("refuses a Supabase service-role key and accepts public keys", () => {
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
   assert.equal(isPublicSupabaseKey(`header.${encode({ role: "service_role" })}.signature`), false);
@@ -223,7 +250,7 @@ test("renders listings and job detail as server HTML with canonical metadata", a
       publication({
         id: "aaaaaaaa-1234-1234-1234-123456789abc",
         fecha_publicacion: "2026-11-13T12:00:00.000Z",
-        imagen_url: "",
+        imagen_url: "post/auxiliar.jpg",
         texto_ocr: "OCR_ONLY_TEXT_DO_NOT_RENDER",
         texto_ia: {
           cargo: "Auxiliar de bodega",
@@ -238,6 +265,24 @@ test("renders listings and job detail as server HTML with canonical metadata", a
           ubicacion: "Cartagena",
           requisitos: ["Disponibilidad inmediata"],
           descripcion: "Apoyo en inventario.",
+          tipo_contrato: "No disponible",
+        },
+        metadata: {},
+      }),
+      publication({
+        id: "cccccccc-1234-1234-1234-123456789abc",
+        fecha_publicacion: "2026-11-12T12:00:00.000Z",
+        imagen_url: "",
+        texto_ocr: "",
+        texto_ia: {
+          cargo: "Sin imagen",
+          titulo: "Sin imagen",
+          empresa: "Vaz Perfumes",
+          salario: "No disponible",
+          contacto: {},
+          ubicacion: "Bogota",
+          requisitos: [],
+          descripcion: "Vacante sin imagen.",
           tipo_contrato: "No disponible",
         },
         metadata: {},
@@ -274,12 +319,14 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.match(listingHtml, /href="\/assets\/favicon\/favicon\.ico"/);
     assert.match(listingHtml, /googletagmanager\.com\/gtag\/js\?id=G-29YCBD5TL9/);
     assert.match(listingHtml, /gtag\('config', 'G-29YCBD5TL9'\)/);
+    assert.match(listingHtml, /GTM-WML4WJG8/);
+    assert.match(listingHtml, /googletagmanager\.com\/ns\.html\?id=GTM-WML4WJG8/);
     assert.doesNotMatch(listingHtml, /vacancy_whatsapp_click|view_vacancy/);
     assert.doesNotMatch(listingHtml, /Se busca panadero artesanal|OCR_ONLY_TEXT_DO_NOT_RENDER/);
     assert.match(listingHtml, /<link rel="canonical" href="https:\/\/grupoavitar\.com\/empleos">/);
     assert.match(listingHtml, /panadero-artesanal-santa-marta-12345678/);
-    assert.match(listingHtml, /src="\/assets\/img\/empleo-placeholder\.svg"/);
-    assert.match(listingHtml, /alt="Imagen ilustrativa de una oportunidad laboral"/);
+    assert.match(listingHtml, /src="https:\/\/example\.supabase\.co\/storage\/v1\/object\/public\/imagenes_posts\/post\/foto\.jpg"/);
+    assert.doesNotMatch(listingHtml, /empleo-placeholder\.svg/);
     assert.match(listingHtml, /kit\.fontawesome\.com\/3140323153\.js/);
     assert.match(listingHtml, /Ver detalle/);
     assert.match(listingHtml, /fa-solid fa-arrow-right/);
@@ -314,7 +361,10 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.equal(detail.status, 200);
     assert.match(detailHtml, /googletagmanager\.com\/gtag\/js\?id=G-29YCBD5TL9/);
     assert.match(detailHtml, /gtag\('config', 'G-29YCBD5TL9'\)/);
+    assert.match(detailHtml, /GTM-WML4WJG8/);
+    assert.match(detailHtml, /pushToDataLayer\("vacancy_whatsapp_click"\)/);
     assert.match(detailHtml, /id="vacancy-whatsapp-cta"/);
+    assert.match(detailHtml, /id="vacancy-image-unavailable" class="jobs-detail-unavailable" hidden/);
     assert.match(detailHtml, /gtag\("event", "view_vacancy", vacancy\)/);
     assert.match(detailHtml, /gtag\("event", "vacancy_whatsapp_click", vacancy\)/);
     assert.match(detailHtml, /"vacancy_title":"Panadero artesanal"/);
@@ -335,13 +385,13 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.doesNotMatch(detailHtml, /Se busca panadero artesanal|OCR_ONLY_TEXT_DO_NOT_RENDER|\*\*/);
 
     const noImageDetail = await worker.fetch(
-      new Request("https://grupoavitar.com/empleos/auxiliar-de-bodega-cartagena-aaaaaaaa"),
+      new Request("https://grupoavitar.com/empleos/sin-imagen-bogota-cccccccc"),
       env,
     );
     const noImageDetailHtml = await noImageDetail.text();
-    assert.equal(noImageDetail.status, 200);
-    assert.match(noImageDetailHtml, /<h1 class="jobs-detail-title" itemprop="headline">Auxiliar de bodega<\/h1>/);
-    assert.match(noImageDetailHtml, /src="\/assets\/img\/empleo-placeholder\.svg"/);
+    assert.equal(noImageDetail.status, 404);
+    assert.match(noImageDetailHtml, /Esta oferta ya no está disponible/);
+    assert.doesNotMatch(noImageDetailHtml, /empleo-placeholder\.svg/);
     assert.match(detailHtml, /Descripción/);
 
     const sitemap = await worker.fetch(
@@ -415,7 +465,7 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
         descripcion: `Auxiliar ${number} con disponibilidad inmediata.`,
         tipo_contrato: "No disponible",
       },
-      imagen_url: "",
+      imagen_url: "post/auxiliar.jpg",
       metadata: {},
     });
   });
@@ -656,5 +706,88 @@ test("renders JSON vacancy data in the home, listing and detail server HTML", as
   } finally {
     globalThis.caches = previousCache;
     globalThis.fetch = previousFetch;
+  }
+});
+
+test("daily cleanup deletes old, imageless and missing-image vacancies", async () => {
+  const previousFetch = globalThis.fetch;
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const serviceKey = `header.${encode({ role: "service_role" })}.signature`;
+  const oldRow = publication({
+    id: "aaaaaaaa-1111-1111-1111-111111111111",
+    fecha_publicacion: "2026-10-30T12:00:00.000Z",
+  });
+  const noImageRow = publication({
+    id: "bbbbbbbb-1111-1111-1111-111111111111",
+    imagen_url: "",
+  });
+  const missingImageRow = publication({
+    id: "cccccccc-1111-1111-1111-111111111111",
+    imagen_url: "post/missing.jpg",
+  });
+  const validRow = publication({
+    id: "dddddddd-1111-1111-1111-111111111111",
+    imagen_url: "post/ok.jpg",
+  });
+  const notVacancyRow = publication({
+    id: "eeeeeeee-1111-1111-1111-111111111111",
+    texto_ia: null,
+    texto_ocr: "",
+    metadata: {},
+  });
+  const deletedBatches = [];
+  globalThis.fetch = async (input, options = {}) => {
+    const url = new URL(String(input));
+    if (url.pathname.startsWith("/storage/")) {
+      return new Response(null, { status: url.pathname.includes("/ok.jpg") ? 200 : 404 });
+    }
+    if (options.method === "DELETE") {
+      deletedBatches.push(url.searchParams.get("id"));
+      return new Response(null, { status: 204 });
+    }
+    const rows = url.searchParams.get("fecha_publicacion")?.startsWith("lte.")
+      ? [oldRow, notVacancyRow]
+      : [noImageRow, missingImageRow, validRow, notVacancyRow];
+    return new Response(JSON.stringify(rows), { headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const result = await runCleanup({
+      SUPABASE_URL,
+      SUPABASE_SERVICE_ROLE_KEY: serviceKey,
+      SITE_URL: "https://grupoavitar.com",
+    }, NOW);
+    assert.equal(result.skipped, false);
+    assert.deepEqual(result.deleted, [oldRow.id, noImageRow.id, missingImageRow.id]);
+    assert.match(result.reasons[oldRow.id], /antigua/);
+    assert.match(result.reasons[noImageRow.id], /sin imagen/);
+    assert.match(result.reasons[missingImageRow.id], /imagen no encontrada/);
+    assert.equal(deletedBatches.length, 1);
+    assert.match(deletedBatches[0], new RegExp(oldRow.id));
+    assert.doesNotMatch(deletedBatches[0], new RegExp(validRow.id));
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("daily cleanup skips when there is no service role key", async () => {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const result = await runCleanup({
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY: `header.${encode({ role: "anon" })}.signature`,
+    SITE_URL: "https://grupoavitar.com",
+  }, NOW);
+  assert.deepEqual(result, { deleted: [], reasons: {}, skipped: true });
+});
+
+test("Google Tag Manager is installed on every static page", () => {
+  const root = new URL("../", import.meta.url);
+  const files = readdirSync(root).filter((name) => name.endsWith(".html"));
+  assert.ok(files.length > 0);
+  for (const name of files) {
+    const html = readFileSync(new URL(name, root), "utf8");
+    assert.match(html, /GTM-WML4WJG8/, name);
+    assert.match(html, /googletagmanager\.com\/gtm\.js\?id=/, name);
+    assert.match(html, /googletagmanager\.com\/ns\.html\?id=GTM-WML4WJG8/, name);
   }
 });

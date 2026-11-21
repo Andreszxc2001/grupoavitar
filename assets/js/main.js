@@ -2,7 +2,33 @@
    NEXORA — Interacciones de UI (JavaScript puro)
    ===================================================== */
 
+const hideVacancyWithBrokenImage = (img) => {
+  const card = img.closest('.jobs-card');
+  if (card) {
+    const article = card.closest('article');
+    if (article) article.remove();
+    return;
+  }
+  const detailPage = img.closest('.jobs-detail-page');
+  if (!detailPage) return;
+  const grid = detailPage.querySelector('.jobs-detail-grid');
+  const notice = detailPage.querySelector('#vacancy-image-unavailable');
+  if (grid) grid.hidden = true;
+  if (notice) notice.hidden = false;
+};
+
+document.addEventListener('error', (event) => {
+  const img = event.target;
+  if (img instanceof HTMLImageElement && (img.closest('.jobs-card') || img.closest('.jobs-detail-image'))) {
+    hideVacancyWithBrokenImage(img);
+  }
+}, true);
+
 document.addEventListener('DOMContentLoaded', function () {
+
+  document.querySelectorAll('.jobs-card img, .jobs-detail-image').forEach((img) => {
+    if (img.complete && img.naturalWidth === 0) hideVacancyWithBrokenImage(img);
+  });
 
   /* ---------- Sticky navbar on scroll ---------- */
   const navbar = document.querySelector('.navbar-nexora');
