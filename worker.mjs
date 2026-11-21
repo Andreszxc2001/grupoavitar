@@ -294,13 +294,15 @@ function publicationToVacancy(publication, supabaseUrl) {
     ? isUnavailable(company)
       ? "oferta-laboral"
       : company
-    : `${title} ${location}`;
+    : isUnavailable(location)
+      ? title
+      : `${title} ${location}`;
   const contact = isPlainObject(structured.contacto) ? structured.contacto : {};
   const description = displayValue(structured.descripcion);
 
   return {
     id,
-    slug: `${slugify(slugBase) || "oferta-laboral"}-${id.slice(0, 8)}`,
+    slug: `${slugify(slugBase) || "oferta-laboral"}-${id.slice(0, 8).toLowerCase()}`,
     title,
     company,
     location,
@@ -660,6 +662,36 @@ function htmlResponse(request, html, status = 200, extraHeaders = {}, env = {}) 
     headers: responseHeaders("text/html; charset=utf-8", {
       "Cache-Control": "public, max-age=60, s-maxage=60",
       ...extraHeaders,
+    }, env),
+  });
+}
+
+function unavailableDetailPage(request, env, { status, title, heading, message, cacheControl }) {
+  const html = `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,follow">
+  <title>${escapeHtml(title)}</title>
+</head>
+<body>
+  <main>
+    <h1>${escapeHtml(heading)}</h1>
+    <p>${escapeHtml(message)}</p>
+    <p><a href="/empleos">Ver ofertas vigentes</a></p>
+  </main>
+</body>
+</html>`;
+  return htmlResponse(request, html, status, { "Cache-Control": cacheControl }, env);
+}
+
+function canonicalDetailRedirect(env, slug) {
+  return new Response(null, {
+    status: 301,
+    headers: responseHeaders("text/html; charset=utf-8", {
+      "Cache-Control": "public, max-age=3600",
+      Location: `/empleos/${slug}`,
     }, env),
   });
 }
@@ -1178,16 +1210,20 @@ function renderListing(request, env, vacancies, filters) {
 }
 
 function renderDetail(request, env, vacancies, slug) {
-  const vacancy = vacancies.find((item) => item.slug === slug);
+  const idSuffix = slug.match(/-([0-9a-f]{8})$/i)?.[1]?.toLowerCase() || "";
+  const vacancy = vacancies.find(
+    (item) => item.slug.slice(-8).toLowerCase() === idSuffix,
+  );
   if (!vacancy) {
-    return htmlResponse(
-      request,
-      "<!doctype html><html lang=\"es\"><head><meta name=\"robots\" content=\"noindex,follow\"><title>Oferta no disponible | Grupo Avitar</title></head><body><main><h1>Esta oferta ya no está disponible</h1><a href=\"/empleos\">Ver ofertas vigentes</a></main></body></html>",
-      404,
-      { "Cache-Control": "no-store" },
-      env,
-    );
+    return unavailableDetailPage(request, env, {
+      status: 410,
+      title: "Oferta vencida | Grupo Avitar",
+      heading: "Esta oferta ya no está disponible",
+      message: "La publicación venció o fue retirada. Consulta las vacantes vigentes.",
+      cacheControl: "public, max-age=60",
+    });
   }
+  if (vacancy.slug !== slug) return canonicalDetailRedirect(env, vacancy.slug);
 
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
   const canonical = `${siteUrl}/empleos/${vacancy.slug}`;
@@ -1470,9 +1506,13 @@ export default {
         slug = url.pathname.slice("/empleos/".length);
         const idPrefix = slug.match(/-([0-9a-f]{8})$/i)?.[1];
         if (!slug || slug.includes("/") || !idPrefix) {
-          return htmlResponse(request, "<!doctype html><title>Oferta no encontrada</title>", 404, {
-            "Cache-Control": "no-store",
-          }, env);
+          return unavailableDetailPage(request, env, {
+            status: 404,
+            title: "Oferta no encontrada | Grupo Avitar",
+            heading: "No encontramos esta oferta",
+            message: "La dirección no corresponde a una vacante válida. Revisa el listado de empleos.",
+            cacheControl: "no-store",
+          });
         }
       }
 

@@ -222,6 +222,69 @@ test("reads vacancy data from JSON posts and fills missing values with No dispon
   assert.match(complete.contactUrl, /^https:\/\/wa\.me\//);
 });
 
+test("slug omite No disponible y el detalle usa 301, 410 y 404", async () => {
+  const base = publication();
+  const sinUbicacion = publication({
+    id: "abcdef12-1234-1234-1234-123456789abc",
+    texto_ia: { ...base.texto_ia, ubicacion: "No disponible" },
+  });
+  const [vacancy] = activeVacancies([sinUbicacion], SUPABASE_URL, NOW);
+  assert.equal(vacancy.slug, "panadero-artesanal-abcdef12");
+  assert.doesNotMatch(vacancy.slug, /no-disponible/);
+
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify([sinUbicacion]), {
+    headers: { "Content-Type": "application/json" },
+  });
+  const env = {
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY: ANON_KEY,
+    SITE_URL: "https://grupoavitar.com",
+  };
+  try {
+    const anterior = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/panadero-artesanal-no-disponible-abcdef12"),
+      env,
+    );
+    assert.equal(anterior.status, 301);
+    assert.equal(anterior.headers.get("location"), "/empleos/panadero-artesanal-abcdef12");
+
+    const canonico = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/panadero-artesanal-abcdef12"),
+      env,
+    );
+    assert.equal(canonico.status, 200);
+
+    const vencida = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/vacante-antigua-99999999"),
+      env,
+    );
+    const vencidaHtml = await vencida.text();
+    assert.equal(vencida.status, 410);
+    assert.match(vencidaHtml, /^<!doctype html>\s*<html lang="es">/);
+    assert.match(vencidaHtml, /<meta name="robots" content="noindex,follow">/);
+    assert.match(vencidaHtml, /<a href="\/empleos">Ver ofertas vigentes<\/a>/);
+    assert.match(vencida.headers.get("cache-control"), /^public, max-age=\d+$/);
+
+    const invalida = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/vacante-sin-sufijo"),
+      env,
+    );
+    const invalidaHtml = await invalida.text();
+    assert.equal(invalida.status, 404);
+    assert.match(invalidaHtml, /^<!doctype html>\s*<html lang="es">/);
+    assert.match(invalidaHtml, /<meta name="robots" content="noindex,follow">/);
+    assert.match(invalidaHtml, /<a href="\/empleos">Ver ofertas vigentes<\/a>/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
+  }
+});
+
 test("includes only current publications and deduplicates identical source text", () => {
   const active = publication();
   const duplicate = publication({
@@ -504,8 +567,9 @@ test("renders listings and job detail as server HTML with canonical metadata", a
       env,
     );
     const noImageDetailHtml = await noImageDetail.text();
-    assert.equal(noImageDetail.status, 404);
+    assert.equal(noImageDetail.status, 410);
     assert.match(noImageDetailHtml, /Esta oferta ya no está disponible/);
+    assert.match(noImageDetailHtml, /<meta name="robots" content="noindex,follow">/);
     assert.doesNotMatch(noImageDetailHtml, /empleo-placeholder\.svg/);
     assert.match(detailHtml, /Descripción/);
 
