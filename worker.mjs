@@ -1174,7 +1174,7 @@ function parseListingFilters(url) {
   }
   const filtersApplied = Boolean(searchTerm || cityTerm || startDate || endDate);
   const page = Number(rawPage);
-  if (!Number.isSafeInteger(page) || (!filtersApplied && page > 1)) return null;
+  if (!Number.isSafeInteger(page)) return null;
   return { searchTerm, cityTerm, startDate, endDate, filtersApplied, page };
 }
 
@@ -1217,7 +1217,7 @@ function renderListing(request, env, vacancies, filters) {
   }
 
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
-  const canonical = `${siteUrl}/empleos${filtersApplied && page > 1 ? `?page=${page}` : ""}`;
+  const canonical = `${siteUrl}/empleos${page > 1 ? `?page=${page}` : ""}`;
   const pageItems = filteredVacancies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const cards = pageItems.map((vacancy) => listingCard(vacancy, siteUrl)).join("");
   const pagination = totalPages > 1
@@ -1569,18 +1569,35 @@ const STATIC_PAGE_PATHS = [
   "/servicio-hvm",
 ];
 
+function latestPublication(vacancies) {
+  const times = vacancies
+    .map((vacancy) => Date.parse(vacancy.publishedAt))
+    .filter((time) => Number.isFinite(time));
+  return times.length ? new Date(Math.max(...times)).toISOString() : new Date().toISOString();
+}
+
+function sitemapEntry(loc, lastmod) {
+  const date = new Date(lastmod);
+  const validLastmod = Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+  return `<url><loc>${escapeXml(loc)}</loc><lastmod>${validLastmod}</lastmod></url>`;
+}
+
 function renderSitemap(env, vacancies, head = false) {
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
-  const urls = [
-    `${siteUrl}/`,
-    ...STATIC_PAGE_PATHS.map((path) => `${siteUrl}${path}`),
-    `${siteUrl}/empleos`,
-    ...cityGroups(vacancies).slice(0, 6).map((city) => `${siteUrl}/empleos/ciudad/${city.slug}`),
-    ...vacancies.map((vacancy) => `${siteUrl}/empleos/${vacancy.slug}`),
+  const now = new Date().toISOString();
+  const latest = latestPublication(vacancies);
+  const entries = [
+    sitemapEntry(`${siteUrl}/`, latest),
+    ...STATIC_PAGE_PATHS.map((path) => sitemapEntry(`${siteUrl}${path}`, now)),
+    sitemapEntry(`${siteUrl}/empleos`, latest),
+    ...cityGroups(vacancies).slice(0, 6).map((city) =>
+      sitemapEntry(`${siteUrl}/empleos/ciudad/${city.slug}`, latestPublication(city.vacancies)),
+    ),
+    ...vacancies.map((vacancy) =>
+      sitemapEntry(`${siteUrl}/empleos/${vacancy.slug}`, vacancy.publishedAt),
+    ),
   ];
-  const body = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls
-    .map((url) => `<url><loc>${escapeXml(url)}</loc></url>`)
-    .join("")}</urlset>`;
+  const body = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${entries.join("")}</urlset>`;
   return new Response(head ? null : body, {
     headers: responseHeaders("application/xml; charset=utf-8", {
       "Cache-Control": "public, max-age=60, s-maxage=60",

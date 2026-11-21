@@ -699,7 +699,9 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
       new Request("https://grupoavitar.com/empleos?page=2"),
       env,
     );
-    assert.equal(secondPage.status, 400);
+    assert.equal(secondPage.status, 200);
+    assert.equal((await secondPage.clone().text()).match(/<article class="col-md-6 col-xl-4">/g)?.length, 1);
+    assert.match(await secondPage.text(), /<link rel="canonical" href="https:\/\/grupoavitar\.com\/empleos\?page=2">/);
 
     const searchOne = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?q=Auxiliar%2051"),
@@ -747,6 +749,67 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
   } finally {
     globalThis.caches = previousCache;
     globalThis.fetch = previousFetch;
+  }
+});
+
+test("paginación sin filtros usa canonical propio y enlaces reales con 120 vacantes", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  const posts = Array.from({ length: 120 }, (_, index) => {
+    const number = index + 1;
+    const prefix = (0x30000000 + number).toString(16).padStart(8, "0");
+    return publication({
+      id: `${prefix}-1234-1234-1234-123456789abc`,
+      texto_ia: {
+        cargo: `Profesional ${number}`,
+        titulo: `Profesional ${number}`,
+        empresa: "Vaz Perfumes",
+        salario: "No disponible",
+        contacto: {
+          link: "No disponible",
+          correo: "No disponible",
+          telefono: "No disponible",
+        },
+        ubicacion: "Bogotá",
+        requisitos: ["Disponibilidad inmediata"],
+        descripcion: `Profesional ${number} con disponibilidad inmediata.`,
+        tipo_contrato: "No disponible",
+      },
+      imagen_url: "post/paginacion.jpg",
+    });
+  });
+  globalThis.fetch = async () => new Response(JSON.stringify(posts), {
+    headers: { "Content-Type": "application/json" },
+  });
+  const env = {
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY: ANON_KEY,
+    SITE_URL: "https://grupoavitar.com",
+  };
+  try {
+    for (const [page, expectedCards] of [[1, 50], [2, 50], [3, 20]]) {
+      const path = page === 1 ? "/empleos" : `/empleos?page=${page}`;
+      const response = await worker.fetch(new Request(`https://grupoavitar.com${path}`), env);
+      const html = await response.text();
+      assert.equal(response.status, 200, path);
+      assert.equal((html.match(/<article class="col-md-6 col-xl-4">/g) || []).length, expectedCards, path);
+      assert.match(
+        html,
+        new RegExp(`<link rel="canonical" href="https://grupoavitar\\.com/empleos${page === 1 ? "" : `\\?page=${page}`}">`),
+      );
+      for (const target of [1, 2, 3]) {
+        const href = target === 1 ? "/empleos" : `/empleos?page=${target}`;
+        assert.ok(html.includes(`href="${href}"`), `${path} -> ${href}`);
+      }
+      assert.match(html, /aria-label="Paginación"/);
+      assert.doesNotMatch(html, /<meta name="robots" content="noindex,follow">/);
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
   }
 });
 
@@ -1200,6 +1263,15 @@ test("ciudades agrupan variantes, publican solo con tres vacantes y enlazan las 
       assert.match(homeHtml, new RegExp(`href="https://grupoavitar\\.com${path}"`));
       assert.ok(sitemapXml.includes(`<loc>https://grupoavitar.com${path}</loc>`), path);
     }
+    assert.match(
+      sitemapXml,
+      /<loc>https:\/\/grupoavitar\.com\/empleos<\/loc><lastmod>\d{4}-\d{2}-\d{2}<\/lastmod>/,
+    );
+    assert.match(
+      sitemapXml,
+      /<loc>https:\/\/grupoavitar\.com\/empleos\/ciudad\/bogota<\/loc><lastmod>\d{4}-\d{2}-\d{2}<\/lastmod>/,
+    );
+    assert.doesNotMatch(sitemapXml, /<loc>[^<]*\?/);
     assert.doesNotMatch(listingHtml, /href="https:\/\/grupoavitar\.com\/empleos\/ciudad\/pereira"/);
     assert.doesNotMatch(sitemapXml, /\/empleos\/ciudad\/pereira/);
   } finally {
@@ -1481,6 +1553,7 @@ test("SEO de páginas estáticas: canonical único, URLs limpias e imágenes loc
     titles.push(title);
     assert.match(html, /<link rel="canonical" href="https:\/\/grupoavitar\.com\/[^"]*">/, name);
     assert.doesNotMatch(html, /href="[^"]*\.html/, name);
+    assert.doesNotMatch(html, /<meta name="keywords"/, name);
     assert.doesNotMatch(html, /images\.unsplash\.com/, name);
     assert.match(html, /<meta property="og:title"/, name);
     assert.doesNotMatch(html, /informaci  n|Redacci  n|selecci  n|presentaci  n/, name);
