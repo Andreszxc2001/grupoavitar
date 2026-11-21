@@ -740,12 +740,12 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
       <div class="collapse navbar-collapse" id="mainNav">
         <ul class="navbar-nav ms-auto align-items-lg-center gap-1 mt-3 mt-lg-0">
           <li class="nav-item"><a class="nav-link nav2" href="/">Inicio</a></li>
-          <li class="nav-item"><a class="nav-link nav2" href="/about.html">Nosotros</a></li>
-          <li class="nav-item"><a class="nav-link nav2" href="/services.html">Servicios</a></li>
+          <li class="nav-item"><a class="nav-link nav2" href="/about">Nosotros</a></li>
+          <li class="nav-item"><a class="nav-link nav2" href="/services">Servicios</a></li>
           <li class="nav-item"><a class="nav-link nav2 active" href="/empleos" aria-current="page">Empleos</a></li>
-          <li class="nav-item"><a class="nav-link nav2" href="/contact.html">Contacto</a></li>
+          <li class="nav-item"><a class="nav-link nav2" href="/contact">Contacto</a></li>
           <li class="nav-item ms-lg-2 mt-2 mt-lg-0">
-            <a href="/contact.html" class="btn btn-primary btn-sm-custom w-100">Solicitar servicio</a>
+            <a href="/contact" class="btn btn-primary btn-sm-custom w-100">Solicitar servicio</a>
           </li>
         </ul>
       </div>
@@ -762,18 +762,18 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
         </div>
         <div class="col-lg-2 col-md-6 col-6">
           <h6>Empresa</h6>
-          <a href="/about.html">Sobre nosotros</a>
-          <a href="/services.html">Servicios</a>
+          <a href="/about">Sobre nosotros</a>
+          <a href="/services">Servicios</a>
           <a href="/empleos">Ofertas de empleo</a>
-          <a href="/contact.html">Contacto</a>
+          <a href="/contact">Contacto</a>
         </div>
         <div class="col-lg-2 col-md-6 col-6">
           <h6>Servicios</h6>
-          <a href="/servicio-ats.html">Hojas de Vida ATS</a>
-          <a href="/servicio-hdv.html">Hojas de Vida Profesionales</a>
-          <a href="/servicio-ctr.html">Cartas de Renuncia</a>
-          <a href="/services.html#optimizacion">Optimización de Perfiles</a>
-          <a href="/servicio-ctp.html">Catálogos e Infoproductos</a>
+          <a href="/servicio-ats">Hojas de Vida ATS</a>
+          <a href="/servicio-hdv">Hojas de Vida Profesionales</a>
+          <a href="/servicio-ctr">Cartas de Renuncia</a>
+          <a href="/services#optimizacion">Optimización de Perfiles</a>
+          <a href="/servicio-ctp">Catálogos e Infoproductos</a>
         </div>
         <div class="col-lg-4 col-md-6">
           <h6>Contáctanos</h6>
@@ -784,9 +784,9 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
       <div class="footer-bottom d-flex flex-column flex-md-row justify-content-between align-items-center gap-2 text-center text-md-start">
         <p class="mb-0">&copy; ${new Date().getFullYear()} Grupo Avitar. Todos los derechos reservados.</p>
         <div class="d-flex flex-wrap gap-4">
-          <a href="/privacidad.html" class="mb-0">Política de Privacidad</a>
-          <a href="/terminos.html" class="mb-0">Términos y Condiciones</a>
-          <a href="/cookies.html" class="mb-0">Política de Cookies</a>
+          <a href="/privacidad" class="mb-0">Política de Privacidad</a>
+          <a href="/terminos" class="mb-0">Términos y Condiciones</a>
+          <a href="/cookies" class="mb-0">Política de Cookies</a>
         </div>
       </div>
     </div>

@@ -33,6 +33,12 @@ Todas las respuestas HTML y de texto del Worker y los estáticos incluyen CSP, `
 
 La CSP se deriva de `env.SUPABASE_URL` para `img-src`. En el Worker público, la constante `CSP_MODE` de `worker.mjs` está en `enforce`; si una integración legítima falla, cámbiala temporalmente a `report-only` (el header pasa a `Content-Security-Policy-Report-Only`), revisa los reportes y vuelve a `enforce`. El archivo `_headers` replica la CSP para activos estáticos con el host de Supabase de producción; actualízalo si cambia el proyecto de Supabase. `_headers` no está excluido en `.assetsignore`.
 
+## Analítica y privacidad
+
+El contenedor `GTM-WML4WJG8` y la etiqueta directa `G-29YCBD5TL9` siguen cargando en las 17 páginas y en el HTML generado por el Worker. La CSP permite `googletagmanager.com` y `google-analytics.com` sin habilitar eval ni `unsafe-eval`. El detalle de vacante envía `view_vacancy` y `vacancy_whatsapp_click` a `gtag` y a `dataLayer`; no envía documentos, correos ni datos de formularios.
+
+Las políticas `cookies.html` y `privacidad.html` describen la medición con Google Analytics 4 y Google Tag Manager. Antes de publicar, confirma en la interfaz de GTM si el contenedor ya incluye la etiqueta GA4 `G-29YCBD5TL9`: de ser así, decide con el dueño si se conserva solo GTM o solo la etiqueta directa para evitar doble conteo.
+
 ## Dependencias e iconos
 
 Bootstrap CSS 5.3.3, Bootstrap JS 5.3.3 y Bootstrap Icons 1.11.3 se cargan desde jsDelivr con versión fija, `integrity` SHA-384 calculado sobre los archivos reales y `crossorigin="anonymous"`. Los hashes se generaron con `curl` y `sha384` sobre los archivos descargados. Bootstrap Icons es la única librería de iconos; se eliminó el kit de FontAwesome.
@@ -63,7 +69,7 @@ CSS y JS locales se sirven con query string de versión (`?v=20261121`) para per
 
 ## SEO de las páginas estáticas
 
-Las 17 páginas tienen título único, descripción, Open Graph y canonical absoluto sin extensión (`https://grupoavitar.com/about`, no `/about.html`). Los enlaces internos también usan rutas limpias y el JS marca el enlace activo comparando la ruta sin extensión. Las dos imágenes de Unsplash se reemplazaron por `/assets/img/profile-img.jpg`, con `width`, `height`, `loading="lazy"` y `decoding="async"`.
+Las 17 páginas tienen título único, descripción, Open Graph y canonical absoluto sin extensión (`https://grupoavitar.com/about`, no `/about.html`). Los enlaces internos de las páginas y del layout del Worker usan rutas limpias, y el JS marca el enlace activo comparando la ruta sin extensión. Las dos imágenes de Unsplash se reemplazaron por `/assets/img/profile-img.jpg`, con `width`, `height`, `loading="lazy"` y `decoding="async"`.
 
 `wrangler.jsonc` mantiene `workers_dev: false` para publicar solo por las rutas configuradas en `grupoavitar.com`.
 

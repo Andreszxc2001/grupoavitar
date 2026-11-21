@@ -416,15 +416,15 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     const listingHtml = await listing.text();
     assert.equal(listing.status, 200);
     assert.match(listingHtml, /<h1>Encuentra una oportunidad/);
-    assert.match(listingHtml, /href="\/about\.html">Nosotros/);
-    assert.match(listingHtml, /href="\/services\.html">Servicios/);
+    assert.match(listingHtml, /href="\/about">Nosotros/);
+    assert.match(listingHtml, /href="\/services">Servicios/);
     assert.match(listingHtml, /href="\/empleos" aria-current="page">Empleos/);
-    assert.match(listingHtml, /href="\/contact\.html">Contacto/);
+    assert.match(listingHtml, /href="\/contact">Contacto/);
     assert.match(listingHtml, /id="mainNav"/);
     assert.match(listingHtml, /\/assets\/js\/main\.js/);
     assert.match(listingHtml, /<footer class="footer-nexora">/);
     assert.match(listingHtml, /logo1\.png/);
-    assert.match(listingHtml, /href="\/privacidad\.html"/);
+    assert.match(listingHtml, /href="\/privacidad"/);
     assert.match(listingHtml, /Escribir por WhatsApp/);
     assert.match(listingHtml, /href="\/assets\/favicon\/favicon-32x32\.png"/);
     assert.match(listingHtml, /href="\/assets\/favicon\/favicon\.ico"/);
@@ -1137,6 +1137,7 @@ test("Google Tag Manager is installed on every static page", () => {
     const html = readFileSync(new URL(name, root), "utf8");
     assert.match(html, /GTM-WML4WJG8/, name);
     assert.match(html, /googletagmanager\.com\/gtm\.js\?id=/, name);
+    assert.match(html, /googletagmanager\.com\/gtag\/js\?id=G-29YCBD5TL9/, name);
     assert.match(html, /googletagmanager\.com\/ns\.html\?id=GTM-WML4WJG8/, name);
     assert.match(html, /integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW\+ALEwIH"/, name);
     assert.match(html, /integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"/, name);
@@ -1184,6 +1185,8 @@ test("el layout dinámico carga jobs.css en lugar de estilos en línea", async (
     const html = await response.text();
     assert.match(html, /\/assets\/css\/jobs\.css\?v=20261121/);
     assert.doesNotMatch(html, /<style>/);
+    assert.match(html, /href="\/about"/);
+    assert.doesNotMatch(html, /href="\/[^"]*\.html/);
   } finally {
     globalThis.fetch = previousFetch;
     globalThis.caches = previousCache;
@@ -1208,4 +1211,14 @@ test("_headers replica la CSP y cachea los estáticos", () => {
   assert.match(headers, /Permissions-Policy: camera=\(\)/);
   assert.match(headers, /Cross-Origin-Opener-Policy: same-origin/);
   assert.match(headers, /\/assets\/\*\n  Cache-Control: public, max-age=604800/);
+});
+
+test("las políticas de cookies y privacidad describen GTM y GA4", () => {
+  const cookies = readFileSync(new URL("../cookies.html", import.meta.url), "utf8");
+  const privacy = readFileSync(new URL("../privacidad.html", import.meta.url), "utf8");
+  assert.match(cookies, /Google Tag Manager/);
+  assert.match(cookies, /Google Analytics 4/);
+  assert.match(cookies, /La medición se usa únicamente para mejorar el sitio/);
+  assert.match(privacy, /Google Analytics y Google Tag Manager/);
+  assert.match(privacy, /No compartimos con ellos los datos que nos envías/);
 });
