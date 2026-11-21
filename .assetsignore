@@ -6,6 +6,8 @@ worker.mjs
 wrangler.jsonc
 package.json
 pnpm-lock.yaml
+pnpm-workspace.yaml
+cleanup/
 .gitignore
 .assetsignore
 .dev.vars*
