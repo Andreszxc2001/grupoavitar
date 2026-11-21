@@ -274,6 +274,7 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.match(listingHtml, /href="\/assets\/favicon\/favicon\.ico"/);
     assert.match(listingHtml, /googletagmanager\.com\/gtag\/js\?id=G-29YCBD5TL9/);
     assert.match(listingHtml, /gtag\('config', 'G-29YCBD5TL9'\)/);
+    assert.doesNotMatch(listingHtml, /vacancy_whatsapp_click|view_vacancy/);
     assert.doesNotMatch(listingHtml, /Se busca panadero artesanal|OCR_ONLY_TEXT_DO_NOT_RENDER/);
     assert.match(listingHtml, /<link rel="canonical" href="https:\/\/grupoavitar\.com\/empleos">/);
     assert.match(listingHtml, /panadero-artesanal-santa-marta-12345678/);
@@ -313,6 +314,13 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.equal(detail.status, 200);
     assert.match(detailHtml, /googletagmanager\.com\/gtag\/js\?id=G-29YCBD5TL9/);
     assert.match(detailHtml, /gtag\('config', 'G-29YCBD5TL9'\)/);
+    assert.match(detailHtml, /id="vacancy-whatsapp-cta"/);
+    assert.match(detailHtml, /gtag\("event", "view_vacancy", vacancy\)/);
+    assert.match(detailHtml, /gtag\("event", "vacancy_whatsapp_click", vacancy\)/);
+    assert.match(detailHtml, /"vacancy_title":"Panadero artesanal"/);
+    assert.match(detailHtml, /"vacancy_slug":"panadero-artesanal-santa-marta-12345678"/);
+    assert.match(detailHtml, /"vacancy_company":"Vaz Perfumes"/);
+    assert.match(detailHtml, /"vacancy_location":"Santa Marta"/);
     assert.match(detailHtml, /<h1 class="jobs-detail-title" itemprop="headline">Panadero artesanal<\/h1>/);
     assert.match(detailHtml, /Publicación reciente/);
     assert.match(detailHtml, /Este portal es informativo/);

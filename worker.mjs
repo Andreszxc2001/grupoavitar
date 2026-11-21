@@ -163,6 +163,15 @@ function escapeXml(value) {
   return escapeHtml(value);
 }
 
+function serializeForScript(value) {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003C")
+    .replace(/>/g, "\\u003E")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
 function slugify(value) {
   return normalize(value)
     .replace(/[^a-z0-9]+/g, "-")
@@ -455,7 +464,7 @@ function htmlResponse(request, html, status = 200, extraHeaders = {}) {
   });
 }
 
-function layout({ title, description, canonical, image, body, robots = "index,follow", structuredData = "" }) {
+function layout({ title, description, canonical, image, body, robots = "index,follow", structuredData = "", analyticsData = null }) {
   const socialImage = image || "";
   return `<!doctype html>
 <html lang="es">
@@ -659,6 +668,19 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
   <script src="https://kit.fontawesome.com/3140323153.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="/assets/js/main.js"></script>
+  ${analyticsData ? `<script>
+    (function () {
+      if (typeof gtag !== "function") return;
+      var vacancy = ${serializeForScript(analyticsData)};
+      gtag("event", "view_vacancy", vacancy);
+      var cta = document.getElementById("vacancy-whatsapp-cta");
+      if (cta) {
+        cta.addEventListener("click", function () {
+          gtag("event", "vacancy_whatsapp_click", vacancy);
+        });
+      }
+    })();
+  </script>` : ""}
 </body>
 </html>`;
 }
@@ -1098,7 +1120,7 @@ function renderDetail(request, env, vacancies, slug) {
             <dl class="jobs-detail-facts">${details}</dl>
             <div class="jobs-detail-source">
               <p class="jobs-detail-cta-copy">¿Quieres postularte con una hoja de vida clara y enfocada en este cargo? Escríbenos y te ayudamos.</p>
-              <a class="btn jobs-whatsapp-button" href="${whatsappUrl}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Solicitar hoja de vida para ${vacancy.title} por WhatsApp`)}"><i class="fa-brands fa-whatsapp" aria-hidden="true"></i> Crear mi hoja de vida</a>
+              <a id="vacancy-whatsapp-cta" class="btn jobs-whatsapp-button" href="${whatsappUrl}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Solicitar hoja de vida para ${vacancy.title} por WhatsApp`)}"><i class="fa-brands fa-whatsapp" aria-hidden="true"></i> Crear mi hoja de vida</a>
               ${originalChannel}
               <a class="btn btn-primary" href="/empleos"><i class="fa-solid fa-arrow-left" aria-hidden="true"></i> Ver todas las vacantes</a>
             </div>
@@ -1121,6 +1143,12 @@ function renderDetail(request, env, vacancies, slug) {
       image: vacancy.imageUrl,
       body,
       structuredData: jobPostingJsonLd(vacancy, siteUrl),
+      analyticsData: {
+        vacancy_title: vacancy.title,
+        vacancy_slug: vacancy.slug,
+        vacancy_company: displayValue(vacancy.company, ""),
+        vacancy_location: displayValue(vacancy.location, ""),
+      },
     }),
   );
 }
