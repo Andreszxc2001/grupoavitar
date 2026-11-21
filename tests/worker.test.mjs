@@ -19,6 +19,16 @@ const NOW = new Date("2026-11-15T12:00:00.000Z");
 const ANON_KEY = `header.${Buffer.from(JSON.stringify({ role: "anon" })).toString("base64url")}.signature`;
 const SERVICE_KEY = `header.${Buffer.from(JSON.stringify({ role: "service_role" })).toString("base64url")}.signature`;
 
+function jsonLdFromHtml(html, type) {
+  const scripts = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g) || [];
+  for (const script of scripts) {
+    const raw = script.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "");
+    const data = JSON.parse(raw);
+    if (data["@type"] === type) return data;
+  }
+  return null;
+}
+
 function publication(overrides = {}) {
   return {
     id: "12345678-1234-1234-1234-123456789abc",
@@ -549,7 +559,9 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.match(detailHtml, /"vacancy_slug":"panadero-artesanal-santa-marta-12345678"/);
     assert.match(detailHtml, /"vacancy_company":"Vaz Perfumes"/);
     assert.match(detailHtml, /"vacancy_location":"Santa Marta"/);
-    assert.match(detailHtml, /<h1 class="jobs-detail-title" itemprop="headline">Panadero artesanal<\/h1>/);
+    assert.match(detailHtml, /<h1 class="jobs-detail-title">Panadero artesanal<\/h1>/);
+    assert.doesNotMatch(detailHtml, /itemscope itemtype="https:\/\/schema\.org\/Article"/);
+    assert.doesNotMatch(detailHtml, /itemprop="headline"|itemprop="description"/);
     assert.match(detailHtml, /Publicación reciente/);
     assert.match(detailHtml, /Este portal es informativo/);
     assert.match(detailHtml, /href="\/terminos">Leer Términos y Condiciones<\/a>/);
@@ -909,7 +921,7 @@ test("renders JSON vacancy data in the home, listing and detail server HTML", as
     );
     const detailHtml = await detail.text();
     assert.equal(detail.status, 200);
-    assert.match(detailHtml, /<h1 class="jobs-detail-title" itemprop="headline">No disponible<\/h1>/);
+    assert.match(detailHtml, /<h1 class="jobs-detail-title">No disponible<\/h1>/);
     assert.match(detailHtml, /Empresa<\/dt><dd>Vaz Perfumes/);
     assert.match(detailHtml, /Ubicación<\/dt><dd>No disponible/);
     assert.match(detailHtml, /Salario<\/dt><dd>No disponible/);
@@ -948,6 +960,135 @@ test("renders JSON vacancy data in the home, listing and detail server HTML", as
   } finally {
     globalThis.caches = previousCache;
     globalThis.fetch = previousFetch;
+  }
+});
+
+test("JobPosting usa datos verificables y el detalle separa postulación del servicio opcional", async () => {
+  const base = publication();
+  const conRegion = publication({
+    id: "55555555-1234-1234-1234-123456789abc",
+    texto_ia: {
+      ...base.texto_ia,
+      ubicacion: "Riohacha, La Guajira",
+      salario: "$1.200.000 - $1.500.000",
+      tipo_contrato: "Prestación de servicios",
+      contacto: { link: "No disponible", correo: "empleos@example.com", telefono: "No disponible" },
+    },
+  });
+  const salarioAmbiguo = publication({
+    id: "66666666-1234-1234-1234-123456789abc",
+    texto_ia: { ...base.texto_ia, salario: "A convenir", tipo_contrato: "Práctica" },
+  });
+  const inyeccion = publication({
+    id: "77777777-1234-1234-1234-123456789abc",
+    texto_ia: {
+      ...base.texto_ia,
+      descripcion: "Panadero con </script><script>alert(1)</script> y más.",
+    },
+  });
+  const contratos = [
+    { prefix: "aaaa1111", tipo: "Término fijo", expected: "FULL_TIME" },
+    { prefix: "bbbb2222", tipo: "Medio tiempo", expected: "PART_TIME" },
+    { prefix: "cccc3333", tipo: "Contrato temporal", expected: "TEMPORARY" },
+    { prefix: "dddd4444", tipo: "Freelance", expected: "CONTRACTOR" },
+    { prefix: "eeee5555", tipo: "Aprendiz", expected: "INTERN" },
+  ];
+  const contratoFilas = contratos.map(({ prefix, tipo }) => publication({
+    id: `${prefix}-1234-1234-1234-123456789abc`,
+    texto_ia: {
+      ...base.texto_ia,
+      descripcion: `Vacante con contrato ${tipo}.`,
+      tipo_contrato: tipo,
+    },
+  }));
+  const filas = [base, conRegion, salarioAmbiguo, inyeccion, ...contratoFilas];
+
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify(filas), {
+    headers: { "Content-Type": "application/json" },
+  });
+  const env = {
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY: ANON_KEY,
+    SITE_URL: "https://grupoavitar.com",
+  };
+  const detalle = async (slug) => {
+    const response = await worker.fetch(
+      new Request(`https://grupoavitar.com/empleos/${slug}`),
+      env,
+    );
+    assert.equal(response.status, 200, slug);
+    return response.text();
+  };
+  try {
+    const baseHtml = await detalle("panadero-artesanal-santa-marta-12345678");
+    const baseLd = jsonLdFromHtml(baseHtml, "JobPosting");
+    assert.ok(baseLd);
+    assert.equal(baseLd.jobLocation.address.addressCountry, "CO");
+    assert.equal(baseLd.jobLocation.address.addressLocality, "Santa Marta");
+    assert.equal("addressRegion" in baseLd.jobLocation.address, false);
+    assert.equal(
+      baseLd.validThrough,
+      new Date(Date.parse(baseLd.datePosted) + 15 * 24 * 60 * 60 * 1000).toISOString(),
+    );
+    assert.deepEqual(baseLd.identifier, {
+      "@type": "PropertyValue",
+      name: "Grupo Avitar",
+      value: base.id,
+    });
+    assert.equal(baseLd.directApply, false);
+    assert.equal(baseLd.employmentType, "FULL_TIME");
+    assert.equal(baseLd.baseSalary.currency, "COP");
+    assert.equal(baseLd.baseSalary.value.value, 1500000);
+
+    const regionHtml = await detalle("panadero-artesanal-riohacha-la-guajira-55555555");
+    const regionLd = jsonLdFromHtml(regionHtml, "JobPosting");
+    assert.ok(regionLd);
+    assert.equal(regionLd.jobLocation.address.addressLocality, "Riohacha");
+    assert.equal(regionLd.jobLocation.address.addressRegion, "La Guajira");
+    assert.equal(regionLd.employmentType, "CONTRACTOR");
+    assert.equal(regionLd.baseSalary.value.minValue, 1200000);
+    assert.equal(regionLd.baseSalary.value.maxValue, 1500000);
+    assert.match(regionHtml, /empleos@example\.com/);
+    assert.match(
+      regionHtml,
+      /mailto:contacto@grupoavitar\.com\?subject=Reporte%20de%20vacante%3A%20panadero-artesanal-riohacha-la-guajira-55555555/,
+    );
+
+    const ambiguoHtml = await detalle("panadero-artesanal-santa-marta-66666666");
+    const ambiguoLd = jsonLdFromHtml(ambiguoHtml, "JobPosting");
+    assert.ok(ambiguoLd);
+    assert.equal("baseSalary" in ambiguoLd, false);
+    assert.equal(ambiguoLd.employmentType, "INTERN");
+
+    const inyeccionHtml = await detalle("panadero-artesanal-santa-marta-77777777");
+    const inyeccionLd = jsonLdFromHtml(inyeccionHtml, "JobPosting");
+    assert.ok(inyeccionLd);
+    assert.match(inyeccionLd.description, /&lt;\/script&gt;/);
+    assert.doesNotMatch(inyeccionHtml, /<\/script><script>alert\(1\)/);
+
+    for (const { prefix, expected } of contratos) {
+      const html = await detalle(`panadero-artesanal-santa-marta-${prefix}`);
+      const ld = jsonLdFromHtml(html, "JobPosting");
+      assert.ok(ld);
+      assert.equal(ld.employmentType, expected);
+    }
+
+    const applyIndex = baseHtml.indexOf("Cómo postularte");
+    const optionalIndex = baseHtml.indexOf("Servicio opcional de Grupo Avitar");
+    const infoIndex = baseHtml.indexOf("Información clave");
+    assert.ok(applyIndex > -1 && optionalIndex > applyIndex && infoIndex > optionalIndex);
+    assert.match(baseHtml, /Crear mi hoja de vida/);
+    assert.match(baseHtml, /pushToDataLayer\("vacancy_whatsapp_click"\)/);
+    assert.doesNotMatch(baseHtml, /itemscope itemtype="https:\/\/schema\.org\/Article"/);
+    assert.doesNotMatch(baseHtml, /itemprop="headline"|itemprop="description"/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
   }
 });
 

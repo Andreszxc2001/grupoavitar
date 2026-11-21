@@ -24,17 +24,13 @@ const VACANCY_JSON_KEYS = [
   "descripcion",
   "tipo_contrato",
 ];
-const EMPLOYMENT_TYPE_MAP = {
-  "tiempo completo": "FULL_TIME",
-  indefinido: "FULL_TIME",
-  "contrato indefinido": "FULL_TIME",
-  "contrato temporal": "TEMPORARY",
-  temporal: "TEMPORARY",
-  "medio tiempo": "PART_TIME",
-  "part time": "PART_TIME",
-  pasantia: "INTERN",
-  practicas: "INTERN",
-};
+const EMPLOYMENT_TYPE_PATTERNS = [
+  { pattern: /tiempo completo|indefinido|termino fijo/, type: "FULL_TIME" },
+  { pattern: /medio tiempo|part time/, type: "PART_TIME" },
+  { pattern: /temporal|obra o labor/, type: "TEMPORARY" },
+  { pattern: /prestacion de servicios|contratista|freelance/, type: "CONTRACTOR" },
+  { pattern: /practica|pasantia|aprendiz/, type: "INTERN" },
+];
 const WHATSAPP_PHONE = "573019441676";
 const FEATURED_JOBS_MARKER = "<!-- FEATURED_JOBS -->";
 const HOME_SEO_MARKER = "<!-- HOME_SEO -->";
@@ -154,6 +150,36 @@ function normalize(value) {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
+}
+
+function employmentTypeFrom(value) {
+  const normalized = normalize(value);
+  if (!normalized) return "";
+  return EMPLOYMENT_TYPE_PATTERNS.find(({ pattern }) => pattern.test(normalized))?.type || "";
+}
+
+function parseCopNumber(token) {
+  const groups = token.split(/[.,]/);
+  if (groups.length > 3) return null;
+  if (groups.slice(1).some((group) => group.length !== 3)) return null;
+  const digits = groups.join("");
+  if (!/^\d+$/.test(digits)) return null;
+  const amount = Number(digits);
+  return Number.isSafeInteger(amount) && amount > 0 ? amount : null;
+}
+
+function parseCopSalary(value) {
+  const raw = text(value);
+  if (!raw) return null;
+  const normalized = normalize(raw);
+  if (!raw.includes("$") && !/cop|pesos?|colombianos?/.test(normalized)) return null;
+  if (/convenir|millon|no disponible/.test(normalized)) return null;
+  const tokens = raw.match(/\d[\d.,]*\d|\d/g) || [];
+  if (tokens.length < 1 || tokens.length > 2) return null;
+  const amounts = tokens.map(parseCopNumber);
+  if (amounts.some((amount) => amount === null)) return null;
+  amounts.sort((left, right) => left - right);
+  return { min: amounts[0], max: amounts[amounts.length - 1] };
 }
 
 function escapeHtml(value) {
@@ -939,18 +965,30 @@ function jobPostingJsonLd(vacancy, siteUrl) {
   ) {
     return "";
   }
-  const description = [
-    vacancy.description,
-    isUnavailable(vacancy.requirements?.join(""))
-      ? ""
-      : `Requisitos: ${vacancy.requirements.join(", ")}`,
-  ].filter(Boolean).join("<br><br>");
+  const requirements = isUnavailable(vacancy.requirements?.join(""))
+    ? ""
+    : `Requisitos: ${vacancy.requirements.map(escapeHtml).join(", ")}`;
+  const description = [escapeHtml(vacancy.description), requirements]
+    .filter(Boolean)
+    .join("<br><br>");
+  const addressParts = vacancy.location.split(",").map((part) => part.trim()).filter(Boolean);
+  const region = addressParts[1];
+  const validThrough = new Date(
+    new Date(vacancy.publishedAt).getTime() + PUBLICATION_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
   const schema = {
     "@context": "https://schema.org",
     "@type": "JobPosting",
     title: vacancy.title,
     description,
     datePosted: vacancy.publishedAt,
+    validThrough,
+    identifier: {
+      "@type": "PropertyValue",
+      name: "Grupo Avitar",
+      value: vacancy.id,
+    },
+    directApply: false,
     hiringOrganization: {
       "@type": "Organization",
       name: vacancy.company,
@@ -959,12 +997,26 @@ function jobPostingJsonLd(vacancy, siteUrl) {
       "@type": "Place",
       address: {
         "@type": "PostalAddress",
-        addressLocality: vacancy.location,
+        addressLocality: addressParts[0] || vacancy.location,
+        addressCountry: "CO",
+        ...(region && !/^(colombia|co|d\.?c\.?|dc)$/.test(normalize(region))
+          ? { addressRegion: region.slice(0, 120) }
+          : {}),
       },
     },
     url: `${siteUrl}/empleos/${vacancy.slug}`,
   };
-  const employmentType = EMPLOYMENT_TYPE_MAP[normalize(vacancy.contractType || "")];
+  const salary = parseCopSalary(vacancy.salary);
+  if (salary) {
+    const value = { "@type": "QuantitativeValue" };
+    if (salary.min === salary.max) value.value = salary.min;
+    else {
+      value.minValue = salary.min;
+      value.maxValue = salary.max;
+    }
+    schema.baseSalary = { "@type": "MonetaryAmount", currency: "COP", value };
+  }
+  const employmentType = employmentTypeFrom(vacancy.contractType);
   if (employmentType) schema.employmentType = employmentType;
   return jsonLd(schema);
 }
@@ -1251,6 +1303,9 @@ function renderDetail(request, env, vacancies, slug) {
     ? `<a class="btn btn-light-custom" href="${escapeHtml(vacancy.channelUrl)}" rel="nofollow noopener noreferrer" target="_blank"><i class="bi bi-box-arrow-up-right" aria-hidden="true"></i> Consultar canal original</a>`
     : "";
   const whatsappUrl = escapeHtml(vacancyWhatsAppUrl(vacancy));
+  const reportUrl = escapeHtml(
+    `mailto:contacto@grupoavitar.com?subject=${encodeURIComponent(`Reporte de vacante: ${vacancy.slug}`)}`,
+  );
   const subtitle = [
     !isUnavailable(company) ? company : "",
     !isUnavailable(location) ? `Empleo en ${escapeHtml(location)}` : "",
@@ -1270,35 +1325,42 @@ function renderDetail(request, env, vacancies, slug) {
         <a href="/">Inicio</a> <span aria-hidden="true">/</span> <a href="/empleos">Empleos</a> <span aria-hidden="true">/</span> <span aria-current="page">${escapeHtml(vacancy.title)}</span>
       </nav>
       <div class="jobs-detail-grid">
-        <article class="jobs-detail-main" itemscope itemtype="https://schema.org/Article">
+        <article class="jobs-detail-main">
           <header class="jobs-detail-header">
             <span class="jobs-detail-status">Publicación reciente</span>
-            <h1 class="jobs-detail-title" itemprop="headline">${escapeHtml(vacancy.title)}</h1>
+            <h1 class="jobs-detail-title">${escapeHtml(vacancy.title)}</h1>
             <p class="jobs-detail-subtitle">${subtitle}</p>
           </header>
           <figure class="jobs-detail-visual">${image}</figure>
           <section class="jobs-detail-description">
             <h2>Descripción de la vacante</h2>
-            <p class="jobs-detail-copy" itemprop="description">${escapeHtml(description)}</p>
+            <p class="jobs-detail-copy">${escapeHtml(description)}</p>
             <h2>Requisitos</h2>
             <p class="jobs-detail-copy">${escapeHtml(requirements)}</p>
           </section>
         </article>
         <aside class="jobs-detail-sidebar" aria-label="Información de la vacante">
+          <section class="jobs-detail-apply">
+            <h2>Cómo postularte</h2>
+            <p>Usa el contacto publicado por el anunciante. Grupo Avitar no recibe ni tramita postulaciones.</p>
+            <p class="jobs-detail-apply-contact">${contactValue}</p>
+            ${originalChannel}
+            <a class="btn btn-primary" href="/empleos"><i class="bi bi-arrow-left" aria-hidden="true"></i> Ver todas las vacantes</a>
+          </section>
+          <section class="jobs-detail-optional">
+            <h2>Servicio opcional de Grupo Avitar</h2>
+            <p class="jobs-detail-cta-copy">¿Quieres postularte con una hoja de vida clara y enfocada en este cargo? Te ayudamos a prepararla; este servicio es opcional e independiente de la vacante.</p>
+            <a id="vacancy-whatsapp-cta" class="btn jobs-whatsapp-button" href="${whatsappUrl}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Solicitar hoja de vida para ${vacancy.title} por WhatsApp`)}"><i class="bi bi-whatsapp" aria-hidden="true"></i> Crear mi hoja de vida</a>
+          </section>
           <section class="jobs-detail-summary">
             <h2>Información clave</h2>
             <dl class="jobs-detail-facts">${details}</dl>
-            <div class="jobs-detail-source">
-              <p class="jobs-detail-cta-copy">¿Quieres postularte con una hoja de vida clara y enfocada en este cargo? Escríbenos y te ayudamos.</p>
-              <a id="vacancy-whatsapp-cta" class="btn jobs-whatsapp-button" href="${whatsappUrl}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Solicitar hoja de vida para ${vacancy.title} por WhatsApp`)}"><i class="bi bi-whatsapp" aria-hidden="true"></i> Crear mi hoja de vida</a>
-              ${originalChannel}
-              <a class="btn btn-primary" href="/empleos"><i class="bi bi-arrow-left" aria-hidden="true"></i> Ver todas las vacantes</a>
-            </div>
           </section>
           <section class="jobs-detail-note">
             <strong>Información importante</strong>
-            <p>Este portal es informativo. La oferta puede haber cerrado o cambiado; confirma su disponibilidad directamente con el empleador o en el canal original antes de postularte. La publicación puede permanecer aquí hasta 15 días desde su fecha de origen.</p>
+            <p>Este portal es informativo. La oferta puede haber cerrado o cambiado; confirma su disponibilidad directamente con el anunciante o en el canal original antes de postularte. La publicación puede permanecer aquí hasta 15 días desde su fecha de origen.</p>
             <a href="/terminos">Leer Términos y Condiciones</a>
+            <a href="${reportUrl}">Reportar o solicitar el retiro de esta vacante</a>
           </section>
         </aside>
       </div>
