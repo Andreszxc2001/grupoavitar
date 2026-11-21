@@ -1,0 +1,15 @@
+{
+  "name": "grupoavitar-limpieza",
+  "main": "index.mjs",
+  "compatibility_date": "2026-11-15",
+  "workers_dev": false,
+  "triggers": {
+    "crons": ["0 13 * * *"]
+  },
+  "vars": {
+    "SUPABASE_URL": "https://ebrwwhjmzygiryemnmcd.supabase.co",
+    "SITE_URL": "https://grupoavitar.com",
+    "CLEANUP_DRY_RUN": "true",
+    "CLEANUP_MAX_DELETES": "200"
+  }
+}

@@ -1,12 +1,19 @@
 const PAGE_SIZE = 50;
+const QUERY_ROW_LIMIT = 1000;
 const QUERY_BATCH_SIZE = 100;
-const MAX_QUERY_ROWS = 1000;
+const MAX_QUERY_ROWS = QUERY_ROW_LIMIT;
 const FEATURED_LIMIT = 12;
 const PUBLICATION_DAYS = 15;
 const CLEANUP_IMAGE_TIMEOUT_MS = 5000;
 const CLEANUP_IMAGE_CONCURRENCY = 10;
 const CLEANUP_DELETE_BATCH = 100;
+const CLEANUP_MAX_PAGES = 50;
+const CLEANUP_DEFAULT_MAX_DELETES = 200;
+const CSP_MODE = "enforce";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const BOOTSTRAP_CSS_INTEGRITY = "sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH";
+const BOOTSTRAP_JS_INTEGRITY = "sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz";
+const BOOTSTRAP_ICONS_CSS_INTEGRITY = "sha384-XGjxtQfXaH2tnPFa9x+ruJTuLE3Aa6LhHSWRr1XeTyhezb4abCG4ccI5AkVDxqC+";
 const NOT_AVAILABLE = "No disponible";
 const VACANCY_JSON_KEYS = [
   "cargo",
@@ -183,30 +190,59 @@ function slugify(value) {
     .replace(/-+$/g, "");
 }
 
+const IMAGE_BUCKET_PREFIX = "/storage/v1/object/public/imagenes_posts/";
+
+function safeObjectPath(pathname) {
+  const segments = pathname.split("/").filter(Boolean);
+  if (!segments.length) return false;
+  return segments.every((segment) => {
+    let decoded = segment;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return false;
+    }
+    return decoded !== "." && decoded !== ".." && !decoded.includes("\\") && !decoded.includes("/");
+  });
+}
+
 function resolveImageUrl(imageUrl, supabaseUrl) {
   const value = text(imageUrl);
-  if (!value) return "";
+  if (!value || value.length > 2000) return "";
   if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^https:\/\//i.test(value)) {
     return "";
   }
   try {
     const base = new URL(supabaseUrl);
-    if (/^https?:\/\//i.test(value)) {
+    if (base.protocol !== "https:") return "";
+    if (/^https:\/\//i.test(value)) {
       const parsed = new URL(value);
-      return parsed.protocol === "https:" ? parsed.href : "";
+      if (
+        parsed.protocol !== "https:" ||
+        parsed.host !== base.host ||
+        parsed.username ||
+        parsed.password ||
+        !parsed.pathname.startsWith(IMAGE_BUCKET_PREFIX) ||
+        !safeObjectPath(parsed.pathname.slice(IMAGE_BUCKET_PREFIX.length))
+      ) {
+        return "";
+      }
+      return parsed.href;
     }
-    if (value.startsWith("/")) {
-      const parsed = new URL(value, base);
-      return parsed.protocol === "https:" ? parsed.href : "";
+    const pathname = value.startsWith("/")
+      ? value
+      : `${IMAGE_BUCKET_PREFIX}${value.replace(/^imagenes_posts\//, "")}`;
+    if (
+      !pathname.startsWith(IMAGE_BUCKET_PREFIX) ||
+      !safeObjectPath(pathname.slice(IMAGE_BUCKET_PREFIX.length))
+    ) {
+      return "";
     }
-    const objectPath = value.replace(/^imagenes_posts\//, "");
-    return new URL(
-      `/storage/v1/object/public/imagenes_posts/${objectPath
-        .split("/")
-        .map(encodeURIComponent)
-        .join("/")}`,
-      base,
-    ).href;
+    const objectPath = pathname.slice(IMAGE_BUCKET_PREFIX.length)
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    return new URL(`${IMAGE_BUCKET_PREFIX}${objectPath}`, base).href;
   } catch {
     return "";
   }
@@ -390,15 +426,16 @@ function publicationQueryUrl(env, now, options = {}) {
   return url;
 }
 
+function supabaseReadHeaders(apiKey) {
+  const headers = { apikey: apiKey };
+  if (!apiKey.startsWith("sb_publishable_")) headers.Authorization = `Bearer ${apiKey}`;
+  return headers;
+}
+
 async function fetchPublicationRows(env, now, options, url = publicationQueryUrl(env, now, options)) {
   const apiKey = supabaseReadKey(env);
   if (!apiKey) throw new Error("No hay una clave válida de solo lectura configurada.");
-  const response = await fetch(url, {
-    headers: {
-      apikey: apiKey,
-      Authorization: `Bearer ${apiKey}`,
-    },
-  });
+  const response = await fetch(url, { headers: supabaseReadHeaders(apiKey) });
   if (response.status === 416) return [];
   if (!response.ok) {
     console.error("Supabase publication read failed", response.status);
@@ -448,31 +485,39 @@ async function getVacancies(env, now, options = {}, maxVacancies = PAGE_SIZE) {
   return vacancies.slice(0, maxVacancies);
 }
 
-function cleanupQueryUrl(env, cutoff, olderThan) {
+function cleanupQueryUrl(env, cutoff, olderThan, offset) {
   const url = new URL("/rest/v1/canales_publicaciones", env.SUPABASE_URL);
   url.searchParams.set("select", PUBLICATION_FIELDS);
   url.searchParams.set("fecha_publicacion", olderThan ? `lte.${cutoff}` : `gt.${cutoff}`);
   url.searchParams.set("order", "fecha_publicacion.desc");
-  url.searchParams.set("limit", String(MAX_QUERY_ROWS));
+  url.searchParams.set("limit", String(QUERY_ROW_LIMIT));
+  if (offset > 0) url.searchParams.set("offset", String(offset));
   return url;
 }
 
 async function fetchCleanupRows(env, cutoff, olderThan) {
-  const apiKey = supabaseReadKey(env);
-  if (!apiKey) throw new Error("No hay una clave válida de solo lectura configurada.");
-  const response = await fetch(cleanupQueryUrl(env, cutoff, olderThan), {
-    headers: {
-      apikey: apiKey,
-      Authorization: `Bearer ${apiKey}`,
-    },
-  });
-  if (!response.ok) {
-    console.error("Supabase cleanup read failed", response.status);
-    throw new Error("No fue posible consultar las publicaciones para la limpieza.");
+  const apiKey = supabaseCleanupKey(env);
+  if (!apiKey) throw new Error("No hay una clave válida de limpieza configurada.");
+  const rows = [];
+  for (let page = 0; page < CLEANUP_MAX_PAGES; page += 1) {
+    const offset = page * QUERY_ROW_LIMIT;
+    const response = await fetch(cleanupQueryUrl(env, cutoff, olderThan, offset), {
+      headers: {
+        apikey: apiKey,
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+    if (!response.ok) {
+      console.error("Supabase cleanup read failed", response.status);
+      throw new Error("No fue posible consultar las publicaciones para la limpieza.");
+    }
+    const batch = await response.json();
+    if (!Array.isArray(batch)) throw new Error("Respuesta inválida de Supabase.");
+    rows.push(...batch);
+    if (batch.length < QUERY_ROW_LIMIT) return rows;
   }
-  const rows = await response.json();
-  if (!Array.isArray(rows)) throw new Error("Respuesta inválida de Supabase.");
-  return rows;
+  console.error(`[limpieza] Se alcanzó el tope de ${CLEANUP_MAX_PAGES} páginas; no se eliminará nada.`);
+  throw new Error("Se alcanzó el tope de páginas de limpieza.");
 }
 
 async function imageExists(url) {
@@ -497,9 +542,9 @@ async function imageExists(url) {
 }
 
 async function deletePublicationIds(env, ids) {
-  const key = env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!isServiceRoleKey(key)) {
-    throw new Error("Se requiere SUPABASE_SERVICE_ROLE_KEY para eliminar publicaciones.");
+  const key = supabaseCleanupKey(env);
+  if (!key) {
+    throw new Error("Se requiere una clave de servicio válida para eliminar publicaciones.");
   }
   const url = new URL("/rest/v1/canales_publicaciones", env.SUPABASE_URL);
   url.searchParams.set("id", `in.(${ids.join(",")})`);
@@ -518,12 +563,19 @@ async function deletePublicationIds(env, ids) {
 }
 
 async function runCleanup(env, now = new Date()) {
-  if (!validEnvironment(env)) throw new Error("Configuración del Worker incompleta.");
-  if (!isServiceRoleKey(env.SUPABASE_SERVICE_ROLE_KEY)) {
-    console.warn("Limpieza omitida: SUPABASE_SERVICE_ROLE_KEY no válida.");
-    return { deleted: [], reasons: {}, skipped: true };
+  if (!supabaseCleanupKey(env)) {
+    console.warn("Limpieza omitida: no hay una clave de servicio válida.");
+    return { deleted: [], wouldDelete: [], reasons: {}, skipped: true, dryRun: true, aborted: false };
   }
+  if (!validCleanupEnvironment(env)) throw new Error("Configuración del Worker de limpieza incompleta.");
 
+  const rawMaxDeletes = text(env.CLEANUP_MAX_DELETES) || String(CLEANUP_DEFAULT_MAX_DELETES);
+  const maxDeletes = Number(rawMaxDeletes);
+  if (!Number.isSafeInteger(maxDeletes) || maxDeletes < 1 || maxDeletes > 1000) {
+    console.error(`[limpieza] CLEANUP_MAX_DELETES no válido: ${rawMaxDeletes.slice(0, 20)}`);
+    throw new Error("CLEANUP_MAX_DELETES no válido.");
+  }
+  const dryRun = (text(env.CLEANUP_DRY_RUN) || "true") !== "false";
   const cutoff = new Date(now.getTime() - PUBLICATION_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const [oldRows, recentRows] = await Promise.all([
     fetchCleanupRows(env, cutoff, true),
@@ -537,7 +589,7 @@ async function runCleanup(env, now = new Date()) {
   };
 
   for (const row of oldRows) {
-    if (isVacancy(row)) addForDeletion(row, `antigua (${text(row.fecha_publicacion)})`);
+    if (isVacancy(row)) addForDeletion(row, `antigua (${text(row.fecha_publicacion).slice(0, 40)})`);
   }
 
   const imageCandidates = [];
@@ -545,12 +597,16 @@ async function runCleanup(env, now = new Date()) {
     if (!isVacancy(row)) continue;
     const id = text(row.id);
     if (!UUID_PATTERN.test(id) || reasons.has(id)) continue;
-    const vacancy = publicationToVacancy(row, env.SUPABASE_URL);
-    if (!vacancy?.imageUrl) {
+    if (!text(row.imagen_url)) {
       addForDeletion(row, "sin imagen");
       continue;
     }
-    imageCandidates.push({ id, imageUrl: vacancy.imageUrl });
+    const imageUrl = resolveImageUrl(row.imagen_url, env.SUPABASE_URL);
+    if (!imageUrl) {
+      console.warn(`[limpieza] Imagen con host o ruta no permitida en ${id}; no se eliminará.`);
+      continue;
+    }
+    imageCandidates.push({ id, imageUrl });
   }
 
   for (let index = 0; index < imageCandidates.length; index += CLEANUP_IMAGE_CONCURRENCY) {
@@ -565,31 +621,108 @@ async function runCleanup(env, now = new Date()) {
 
   const ids = [...reasons.keys()];
   for (const id of ids) {
-    console.log(`[limpieza] Eliminar vacante ${id}: ${reasons.get(id)}`);
+    console.log(`[limpieza] ${dryRun ? "Eliminaría" : "Eliminar"} vacante ${id}: ${reasons.get(id)}`);
+  }
+  if (ids.length > maxDeletes) {
+    console.error(`[limpieza] ${ids.length} candidatos superan el tope de ${maxDeletes}; no se eliminará nada.`);
+    return {
+      deleted: [],
+      wouldDelete: ids,
+      reasons: Object.fromEntries(reasons),
+      skipped: false,
+      dryRun,
+      aborted: true,
+    };
+  }
+  if (dryRun) {
+    console.log(`[limpieza] Modo prueba: ${ids.length} vacantes no eliminadas.`);
+    return {
+      deleted: [],
+      wouldDelete: ids,
+      reasons: Object.fromEntries(reasons),
+      skipped: false,
+      dryRun: true,
+      aborted: false,
+    };
   }
   for (let index = 0; index < ids.length; index += CLEANUP_DELETE_BATCH) {
     await deletePublicationIds(env, ids.slice(index, index + CLEANUP_DELETE_BATCH));
   }
   console.log(`[limpieza] ${ids.length} vacantes eliminadas.`);
-  return { deleted: ids, reasons: Object.fromEntries(reasons), skipped: false };
+  return {
+    deleted: ids,
+    wouldDelete: ids,
+    reasons: Object.fromEntries(reasons),
+    skipped: false,
+    dryRun: false,
+    aborted: false,
+  };
 }
 
-function responseHeaders(contentType, extra = {}) {
+function contentSecurityPolicy(env) {
+  let supabaseHost = "";
+  try {
+    supabaseHost = new URL(env.SUPABASE_URL).hostname;
+  } catch {
+    supabaseHost = "";
+  }
+  const imgSources = [
+    "'self'",
+    "data:",
+    supabaseHost ? `https://${supabaseHost}` : "",
+    "https://www.googletagmanager.com",
+    "https://www.google-analytics.com",
+  ].filter(Boolean);
+  const directives = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://cdn.jsdelivr.net",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net",
+    "font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net",
+    `img-src ${imgSources.join(" ")}`,
+    "connect-src 'self' https://www.google-analytics.com https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com",
+    "frame-src https://www.googletagmanager.com",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "object-src 'none'",
+  ];
+  return `${directives.join("; ")};`;
+}
+
+function securityHeaders(env) {
+  const cspHeader = CSP_MODE === "report-only"
+    ? "Content-Security-Policy-Report-Only"
+    : "Content-Security-Policy";
   return {
-    "Content-Type": contentType,
+    [cspHeader]: contentSecurityPolicy(env),
+    "X-Frame-Options": "DENY",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
+  };
+}
+
+function applySecurityHeaders(headers, env) {
+  for (const [name, value] of Object.entries(securityHeaders(env))) headers.set(name, value);
+  return headers;
+}
+
+function responseHeaders(contentType, extra = {}, env = {}) {
+  return {
+    "Content-Type": contentType,
+    ...securityHeaders(env),
     ...extra,
   };
 }
 
-function htmlResponse(request, html, status = 200, extraHeaders = {}) {
+function htmlResponse(request, html, status = 200, extraHeaders = {}, env = {}) {
   return new Response(request.method === "HEAD" ? null : html, {
     status,
     headers: responseHeaders("text/html; charset=utf-8", {
       "Cache-Control": "public, max-age=60, s-maxage=60",
       ...extraHeaders,
-    }),
+    }, env),
   });
 }
 
@@ -648,8 +781,9 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@400;600;700;800&display=swap" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="/assets/css/custom.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="${BOOTSTRAP_CSS_INTEGRITY}" crossorigin="anonymous">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" integrity="${BOOTSTRAP_ICONS_CSS_INTEGRITY}" crossorigin="anonymous">
+  <link href="/assets/css/custom.css?v=20261121" rel="stylesheet">
   <style>
     .jobs-page { min-height: 65vh; }
     .jobs-hero { position: relative; overflow: hidden; padding: 8.5rem 0 4.5rem; background: linear-gradient(125deg, #081a40 0%, #0a1f4d 55%, #145bc2 100%); color: #fff; }
@@ -769,12 +903,7 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
         <div class="col-lg-4 col-md-6">
           <a class="d-inline-block mb-3" href="/"><img src="/assets/img/logo1.png" alt="Grupo Avitar" style="height:48px;width:auto;"></a>
           <p class="text-white-50 mb-4" style="max-width:320px;">Servicio especializado en la elaboración, organización y optimización de documentos laborales y profesionales.</p>
-          <div class="d-flex gap-2">
-            <a href="#" class="social-icon" aria-label="X"><i class="fa-brands fa-x-twitter"></i></a>
-            <a href="#" class="social-icon" aria-label="LinkedIn"><i class="fa-brands fa-linkedin-in"></i></a>
-            <a href="#" class="social-icon" aria-label="Facebook"><i class="fa-brands fa-facebook-f"></i></a>
-            <a href="#" class="social-icon" aria-label="Instagram"><i class="fa-brands fa-instagram"></i></a>
-          </div>
+          <!-- TODO: URL redes -->
         </div>
         <div class="col-lg-2 col-md-6 col-6">
           <h6>Empresa</h6>
@@ -794,7 +923,7 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
         <div class="col-lg-4 col-md-6">
           <h6>Contáctanos</h6>
           <p class="text-white-50 mb-3">Escríbenos y cuéntanos qué necesitas. Nuestro equipo te orientará sobre el servicio que puede ayudarte.</p>
-          <a href="https://wa.me/573019441676" target="_blank" rel="noopener" class="btn btn-primary"><i class="fa-brands fa-whatsapp me-1"></i> Escribir por WhatsApp</a>
+          <a href="https://wa.me/573019441676" target="_blank" rel="noopener noreferrer" class="btn btn-primary"><i class="bi bi-whatsapp me-1"></i> Escribir por WhatsApp</a>
         </div>
       </div>
       <div class="footer-bottom d-flex flex-column flex-md-row justify-content-between align-items-center gap-2 text-center text-md-start">
@@ -807,9 +936,8 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
       </div>
     </div>
   </footer>
-  <script src="https://kit.fontawesome.com/3140323153.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="/assets/js/main.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="${BOOTSTRAP_JS_INTEGRITY}" crossorigin="anonymous"></script>
+  <script src="/assets/js/main.js?v=20261121"></script>
   ${analyticsData ? `<script>
     (function () {
       window.dataLayer = window.dataLayer || [];
@@ -980,7 +1108,7 @@ function listingCard(vacancy, siteUrl) {
         <p class="jobs-card-salary">Salario: ${escapeHtml(displayValue(vacancy.salary))}</p>
         ${description}
         ${requirements}
-        <a class="jobs-card-action btn btn-primary" href="${escapeHtml(`${siteUrl}/empleos/${vacancy.slug}`)}"><span>Ver detalle</span><i class="fa-solid fa-arrow-right" aria-hidden="true"></i></a>
+        <a class="jobs-card-action btn btn-primary" href="${escapeHtml(`${siteUrl}/empleos/${vacancy.slug}`)}"><span>Ver detalle</span><i class="bi bi-arrow-right" aria-hidden="true"></i></a>
       </div>
     </div>
   </article>`;
@@ -1003,7 +1131,7 @@ function renderFeaturedJobs(vacancies, env) {
       </div>
       <div class="home-jobs-toolbar">
         <div class="home-jobs-search-copy">
-          <span class="home-jobs-search-icon"><i class="fa-solid fa-briefcase" aria-hidden="true"></i></span>
+          <span class="home-jobs-search-icon"><i class="bi bi-briefcase" aria-hidden="true"></i></span>
           <div>
             <h3>Encuentra tu próxima oportunidad</h3>
             <p>Busca entre las vacantes activas por cargo, empresa o palabra clave.</p>
@@ -1012,20 +1140,20 @@ function renderFeaturedJobs(vacancies, env) {
         <form class="home-jobs-search" action="/empleos" method="get" role="search">
           <div class="home-jobs-search-field">
             <label class="visually-hidden" for="home-jobs-search-input">Buscar vacantes por palabra clave</label>
-            <i class="fa-solid fa-magnifying-glass home-jobs-search-field-icon" aria-hidden="true"></i>
+            <i class="bi bi-search home-jobs-search-field-icon" aria-hidden="true"></i>
             <input id="home-jobs-search-input" class="form-control" type="search" name="q" placeholder="Ej. auxiliar, ventas, Bogotá..." maxlength="100">
           </div>
-          <button class="btn btn-primary" type="submit">Buscar <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></button>
+          <button class="btn btn-primary" type="submit">Buscar <i class="bi bi-arrow-right" aria-hidden="true"></i></button>
         </form>
         <span class="home-jobs-count"><strong>${total}</strong> ${total === 1 ? "vacante disponible" : "vacantes disponibles"}<small class="d-block fw-normal">Publicadas y vigentes</small></span>
       </div>
       <div class="home-jobs-results-head">
         <h3>Vacantes destacadas</h3>
-        <span><i class="fa-solid fa-bolt" aria-hidden="true"></i> Actualizadas constantemente</span>
+        <span><i class="bi bi-lightning-charge" aria-hidden="true"></i> Actualizadas constantemente</span>
       </div>
       ${content}
       <div class="mt-5 text-center">
-        <a class="btn btn-primary btn-lg" href="/empleos">Ver todas las vacantes <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></a>
+        <a class="btn btn-primary btn-lg" href="/empleos">Ver todas las vacantes <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
       </div>
     </div>
   </section>`;
@@ -1079,7 +1207,7 @@ function renderListing(request, env, vacancies, filters) {
   });
   const totalPages = Math.max(1, Math.ceil(filteredVacancies.length / PAGE_SIZE));
   if (page > totalPages) {
-    return htmlResponse(request, "<!doctype html><title>Página no encontrada</title>", 404);
+    return htmlResponse(request, "<!doctype html><title>Página no encontrada</title>", 404, {}, env);
   }
 
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
@@ -1130,7 +1258,7 @@ function renderListing(request, env, vacancies, filters) {
             <div class="jobs-hero-art" aria-hidden="true">
               <div class="jobs-hero-card">
                 <div class="jobs-art-top"><span>Grupo Avitar</span><span class="jobs-art-status">Actualizadas</span></div>
-                <span class="jobs-art-icon"><i class="fa-solid fa-briefcase" aria-hidden="true"></i></span>
+                <span class="jobs-art-icon"><i class="bi bi-briefcase" aria-hidden="true"></i></span>
                 <h2>Oportunidades laborales</h2>
                 <p>Consulta los detalles y la publicación de origen de cada vacante.</p>
               </div>
@@ -1188,6 +1316,9 @@ function renderListing(request, env, vacancies, filters) {
       robots: filtersApplied ? "noindex,follow" : "index,follow",
       structuredData: filtersApplied ? "" : itemListJsonLd(pageItems, siteUrl),
     }),
+    200,
+    {},
+    env,
   );
 }
 
@@ -1199,6 +1330,7 @@ function renderDetail(request, env, vacancies, slug) {
       "<!doctype html><html lang=\"es\"><head><meta name=\"robots\" content=\"noindex,follow\"><title>Oferta no disponible | Grupo Avitar</title></head><body><main><h1>Esta oferta ya no está disponible</h1><a href=\"/empleos\">Ver ofertas vigentes</a></main></body></html>",
       404,
       { "Cache-Control": "no-store" },
+      env,
     );
   }
 
@@ -1211,21 +1343,21 @@ function renderDetail(request, env, vacancies, slug) {
   const contractType = displayValue(vacancy.contractType);
   const contactLabel = displayValue(vacancy.contactLabel);
   const contactValue = vacancy.contactUrl && !isUnavailable(contactLabel)
-    ? `<a href="${escapeHtml(vacancy.contactUrl)}" rel="nofollow noopener noreferrer" target="_blank">${escapeHtml(contactLabel)} <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i></a>`
+    ? `<a href="${escapeHtml(vacancy.contactUrl)}" rel="nofollow noopener noreferrer" target="_blank">${escapeHtml(contactLabel)} <i class="bi bi-box-arrow-up-right" aria-hidden="true"></i></a>`
     : escapeHtml(contactLabel);
   const details = [
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-building" aria-hidden="true"></i> Empresa</dt><dd>${escapeHtml(company)}</dd></div>`,
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-location-dot" aria-hidden="true"></i> Ubicación</dt><dd>${escapeHtml(location)}</dd></div>`,
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-money-bill-wave" aria-hidden="true"></i> Salario</dt><dd>${escapeHtml(salary)}</dd></div>`,
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-file-contract" aria-hidden="true"></i> Tipo de contrato</dt><dd>${escapeHtml(contractType)}</dd></div>`,
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-address-book" aria-hidden="true"></i> Contacto</dt><dd>${contactValue}</dd></div>`,
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-calendar-days" aria-hidden="true"></i> Fecha de publicación</dt><dd><time datetime="${escapeHtml(vacancy.publishedAt)}">${escapeHtml(formatDate(vacancy.publishedAt))}</time></dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-building" aria-hidden="true"></i> Empresa</dt><dd>${escapeHtml(company)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-geo-alt" aria-hidden="true"></i> Ubicación</dt><dd>${escapeHtml(location)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-cash-coin" aria-hidden="true"></i> Salario</dt><dd>${escapeHtml(salary)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-file-earmark-text" aria-hidden="true"></i> Tipo de contrato</dt><dd>${escapeHtml(contractType)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-person-vcard" aria-hidden="true"></i> Contacto</dt><dd>${contactValue}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-calendar3" aria-hidden="true"></i> Fecha de publicación</dt><dd><time datetime="${escapeHtml(vacancy.publishedAt)}">${escapeHtml(formatDate(vacancy.publishedAt))}</time></dd></div>`,
     vacancy.channelName
-      ? `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-bullhorn" aria-hidden="true"></i> Canal de origen</dt><dd>${escapeHtml(vacancy.channelName)}</dd></div>`
+      ? `<div class="jobs-detail-fact"><dt><i class="bi bi-megaphone" aria-hidden="true"></i> Canal de origen</dt><dd>${escapeHtml(vacancy.channelName)}</dd></div>`
       : "",
   ].filter(Boolean).join("");
   const originalChannel = vacancy.channelUrl
-    ? `<a class="btn btn-light-custom" href="${escapeHtml(vacancy.channelUrl)}" rel="nofollow noopener noreferrer" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Consultar canal original</a>`
+    ? `<a class="btn btn-light-custom" href="${escapeHtml(vacancy.channelUrl)}" rel="nofollow noopener noreferrer" target="_blank"><i class="bi bi-box-arrow-up-right" aria-hidden="true"></i> Consultar canal original</a>`
     : "";
   const whatsappUrl = escapeHtml(vacancyWhatsAppUrl(vacancy));
   const subtitle = [
@@ -1267,9 +1399,9 @@ function renderDetail(request, env, vacancies, slug) {
             <dl class="jobs-detail-facts">${details}</dl>
             <div class="jobs-detail-source">
               <p class="jobs-detail-cta-copy">¿Quieres postularte con una hoja de vida clara y enfocada en este cargo? Escríbenos y te ayudamos.</p>
-              <a id="vacancy-whatsapp-cta" class="btn jobs-whatsapp-button" href="${whatsappUrl}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Solicitar hoja de vida para ${vacancy.title} por WhatsApp`)}"><i class="fa-brands fa-whatsapp" aria-hidden="true"></i> Crear mi hoja de vida</a>
+              <a id="vacancy-whatsapp-cta" class="btn jobs-whatsapp-button" href="${whatsappUrl}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Solicitar hoja de vida para ${vacancy.title} por WhatsApp`)}"><i class="bi bi-whatsapp" aria-hidden="true"></i> Crear mi hoja de vida</a>
               ${originalChannel}
-              <a class="btn btn-primary" href="/empleos"><i class="fa-solid fa-arrow-left" aria-hidden="true"></i> Ver todas las vacantes</a>
+              <a class="btn btn-primary" href="/empleos"><i class="bi bi-arrow-left" aria-hidden="true"></i> Ver todas las vacantes</a>
             </div>
           </section>
           <section class="jobs-detail-note">
@@ -1297,6 +1429,9 @@ function renderDetail(request, env, vacancies, slug) {
         vacancy_location: displayValue(vacancy.location, ""),
       },
     }),
+    200,
+    {},
+    env,
   );
 }
 
@@ -1333,7 +1468,7 @@ function renderSitemap(env, vacancies, head = false) {
   return new Response(head ? null : body, {
     headers: responseHeaders("application/xml; charset=utf-8", {
       "Cache-Control": "public, max-age=60, s-maxage=60",
-    }),
+    }, env),
   });
 }
 
@@ -1344,7 +1479,7 @@ function renderRobots(env, head = false) {
     {
       headers: responseHeaders("text/plain; charset=utf-8", {
         "Cache-Control": "public, max-age=3600",
-      }),
+      }, env),
     },
   );
 }
@@ -1368,7 +1503,16 @@ function isPublicSupabaseKey(key) {
 }
 
 function isServiceRoleKey(key) {
-  return supabaseJwtRole(key) === "service_role";
+  return supabaseJwtRole(key) === "service_role" || /^sb_secret_[a-zA-Z0-9_-]+$/.test(text(key));
+}
+
+function hasPrivilegedKey(env) {
+  return Boolean(text(env.SUPABASE_SERVICE_ROLE_KEY) || text(env.SUPABASE_SECRET_KEY));
+}
+
+function supabaseCleanupKey(env) {
+  const key = text(env.SUPABASE_SERVICE_ROLE_KEY) || text(env.SUPABASE_SECRET_KEY);
+  return isServiceRoleKey(key) ? key : "";
 }
 
 function supabaseJwtRole(key) {
@@ -1385,11 +1529,6 @@ function supabaseJwtRole(key) {
 }
 
 function supabaseReadKey(env) {
-  if (env.SUPABASE_SERVICE_ROLE_KEY) {
-    return isServiceRoleKey(env.SUPABASE_SERVICE_ROLE_KEY)
-      ? env.SUPABASE_SERVICE_ROLE_KEY
-      : "";
-  }
   return isPublicSupabaseKey(env.SUPABASE_ANON_KEY)
     ? env.SUPABASE_ANON_KEY
     : "";
@@ -1407,8 +1546,26 @@ function validEnvironment(env) {
   }
 }
 
+function validCleanupEnvironment(env) {
+  if (!env.SUPABASE_URL || !supabaseCleanupKey(env)) return false;
+  try {
+    return new URL(env.SUPABASE_URL).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export default {
   async fetch(request, env) {
+    if (hasPrivilegedKey(env)) {
+      console.error("Configuración insegura: el Worker público no debe tener claves de servicio");
+      return new Response("No fue posible cargar las ofertas en este momento.", {
+        status: 503,
+        headers: responseHeaders("text/plain; charset=utf-8", {
+          "Cache-Control": "no-store",
+        }, env),
+      });
+    }
     const url = new URL(request.url);
     const isHomeRoute = url.pathname === "/" || url.pathname === "/index.html";
     const isDynamicRoute =
@@ -1423,7 +1580,7 @@ export default {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("Método no permitido", {
         status: 405,
-        headers: responseHeaders("text/plain; charset=utf-8", { Allow: "GET, HEAD" }),
+        headers: responseHeaders("text/plain; charset=utf-8", { Allow: "GET, HEAD" }, env),
       });
     }
     if (isHomeRoute && request.method === "HEAD") return env.ASSETS.fetch(request);
@@ -1433,7 +1590,7 @@ export default {
           status: 503,
           headers: responseHeaders("text/plain; charset=utf-8", {
             "Cache-Control": "no-store",
-          }),
+          }, env),
         });
       }
       return renderRobots(env, request.method === "HEAD");
@@ -1443,14 +1600,14 @@ export default {
         status: 503,
         headers: responseHeaders("text/plain; charset=utf-8", {
           "Cache-Control": "no-store",
-        }),
+        }, env),
       });
     }
     try {
       const now = new Date();
       const filters = url.pathname === "/empleos" ? parseListingFilters(url) : null;
       if (url.pathname === "/empleos" && !filters) {
-        return htmlResponse(request, "<!doctype html><title>Solicitud inválida</title>", 400);
+        return htmlResponse(request, "<!doctype html><title>Solicitud inválida</title>", 400, {}, env);
       }
 
       let vacancies = [];
@@ -1471,7 +1628,7 @@ export default {
         if (!slug || slug.includes("/") || !idPrefix) {
           return htmlResponse(request, "<!doctype html><title>Oferta no encontrada</title>", 404, {
             "Cache-Control": "no-store",
-          });
+          }, env);
         }
         vacancies = await getVacancies(env, now, {}, MAX_QUERY_ROWS);
       }
@@ -1492,6 +1649,7 @@ export default {
         headers.delete("ETag");
         headers.set("Content-Type", "text/html; charset=utf-8");
         headers.set("Cache-Control", "public, max-age=60, s-maxage=60");
+        applySecurityHeaders(headers, env);
         const siteUrl = env.SITE_URL.replace(/\/+$/, "");
         return new Response(
           homeHtml
@@ -1512,12 +1670,9 @@ export default {
         status: 503,
         headers: responseHeaders("text/plain; charset=utf-8", {
           "Cache-Control": "no-store",
-        }),
+        }, env),
       });
     }
-  },
-  async scheduled(controller, env, ctx) {
-    await runCleanup(env, new Date(controller.scheduledTime));
   },
 };
 
