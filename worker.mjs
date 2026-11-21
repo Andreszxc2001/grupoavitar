@@ -1,7 +1,7 @@
 const PAGE_SIZE = 50;
 const QUERY_ROW_LIMIT = 1000;
-const QUERY_BATCH_SIZE = 100;
-const MAX_QUERY_ROWS = QUERY_ROW_LIMIT;
+const VACANCY_CACHE_MINUTES = 1;
+const VACANCY_STALE_MINUTES = 10;
 const FEATURED_LIMIT = 12;
 const PUBLICATION_DAYS = 15;
 const CLEANUP_IMAGE_TIMEOUT_MS = 5000;
@@ -350,27 +350,7 @@ function activeVacancies(publications, supabaseUrl, now = new Date()) {
   return vacancies;
 }
 
-function queryWords(value) {
-  return normalize(value)
-    .split(/\s+/)
-    .map((word) => word.replace(/[^\p{L}\p{N}]/gu, ""))
-    .filter(Boolean)
-    .map((word) => word.slice(0, 4));
-}
-
-function dateFilterIso(value, endOfDay = false) {
-  return `${value}T${endOfDay ? "04:59:59.999" : "05:00:00.000"}Z`;
-}
-
-function publicationQueryUrl(env, now, options = {}) {
-  const {
-    searchTerm = "",
-    cityTerm = "",
-    startDate = "",
-    endDate = "",
-    limit = QUERY_BATCH_SIZE,
-    offset = 0,
-  } = options;
+function publicationQueryUrl(env, now) {
   const cutoff = new Date(
     now.getTime() - PUBLICATION_DAYS * 24 * 60 * 60 * 1000,
   ).toISOString();
@@ -378,51 +358,7 @@ function publicationQueryUrl(env, now, options = {}) {
   url.searchParams.set("select", PUBLICATION_FIELDS);
   url.searchParams.set("fecha_publicacion", `gte.${cutoff}`);
   url.searchParams.set("order", "fecha_publicacion.desc");
-  url.searchParams.set("limit", String(limit));
-  if (offset > 0) url.searchParams.set("offset", String(offset));
-  if (startDate) {
-    url.searchParams.append("fecha_publicacion", `gte.${dateFilterIso(startDate)}`);
-  }
-  if (endDate) {
-    url.searchParams.append("fecha_publicacion", `lte.${dateFilterIso(endDate, true)}`);
-  }
-  const contentFields = [
-    "texto_ocr",
-    "canal_nombre",
-    "texto_ia->>titulo",
-    "texto_ia->>cargo",
-    "texto_ia->>empresa",
-    "texto_ia->>salario",
-    "texto_ia->>ubicacion",
-    "texto_ia->>descripcion",
-    "texto_ia->>tipo_contrato",
-    "texto_ia->>requisitos",
-    "texto_ia->contacto->>link",
-    "texto_ia->contacto->>correo",
-    "texto_ia->contacto->>telefono",
-  ];
-  for (const word of queryWords(searchTerm)) {
-    const pattern = `*${word}*`;
-    url.searchParams.append(
-      "or",
-      `(${contentFields.map((field) => `${field}.ilike.${pattern}`).join(",")})`,
-    );
-  }
-  const cityFields = [
-    "metadata->>ciudad",
-    "metadata->>city",
-    "metadata->>ubicacion",
-    "metadata->>location",
-    "texto_ia->>ubicacion",
-    "texto_ocr",
-  ];
-  for (const word of queryWords(cityTerm)) {
-    const pattern = `*${word}*`;
-    url.searchParams.append(
-      "or",
-      `(${cityFields.map((field) => `${field}.ilike.${pattern}`).join(",")})`,
-    );
-  }
+  url.searchParams.set("limit", String(QUERY_ROW_LIMIT));
   return url;
 }
 
@@ -432,7 +368,7 @@ function supabaseReadHeaders(apiKey) {
   return headers;
 }
 
-async function fetchPublicationRows(env, now, options, url = publicationQueryUrl(env, now, options)) {
+async function fetchPublicationRows(env, now, url = publicationQueryUrl(env, now)) {
   const apiKey = supabaseReadKey(env);
   if (!apiKey) throw new Error("No hay una clave válida de solo lectura configurada.");
   const response = await fetch(url, { headers: supabaseReadHeaders(apiKey) });
@@ -446,43 +382,45 @@ async function fetchPublicationRows(env, now, options, url = publicationQueryUrl
   return rows;
 }
 
-async function getPublicationRows(env, now, options = {}) {
-  const url = publicationQueryUrl(env, now, options);
-  const minute = Math.floor(now.getTime() / 60000);
-  const accessMode = env.SUPABASE_SERVICE_ROLE_KEY ? "service-role" : "anon";
-  const cacheKey = new Request(
-    `${env.SITE_URL}/__cache/publicaciones-laborales/${accessMode}/${minute}${url.pathname}${url.search}`,
-  );
-  const cache = caches.default;
-  const cached = await cache.match(cacheKey);
-  if (cached) return cached.json();
-
-  const rows = await fetchPublicationRows(env, now, options, url);
-  await cache.put(
-    cacheKey,
-    new Response(JSON.stringify(rows), {
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "public, max-age=60",
-      },
-    }),
-  );
-  return rows;
+function vacancyCacheKey(env, minute) {
+  const siteUrl = env.SITE_URL.replace(/\/+$/, "");
+  return new Request(`${siteUrl}/__cache/vacantes-activas/${minute}`);
 }
 
-async function getVacancies(env, now, options = {}, maxVacancies = PAGE_SIZE) {
-  const rows = [];
-  let vacancies = [];
-  let offset = 0;
-  while (offset < MAX_QUERY_ROWS && vacancies.length < maxVacancies) {
-    const limit = Math.min(QUERY_BATCH_SIZE, MAX_QUERY_ROWS - offset);
-    const page = await getPublicationRows(env, now, { ...options, limit, offset });
-    rows.push(...page);
-    vacancies = activeVacancies(rows, env.SUPABASE_URL, now);
-    if (page.length < limit) break;
-    offset += limit;
+async function getActiveVacancies(env, now) {
+  const currentMinute = Math.floor(now.getTime() / 60000);
+  const cache = caches.default;
+  const fresh = await cache.match(vacancyCacheKey(env, currentMinute));
+  if (fresh) return fresh.json();
+
+  const cacheTime = new Date(currentMinute * 60000);
+  try {
+    const rows = await fetchPublicationRows(env, cacheTime);
+    await cache.put(
+      vacancyCacheKey(env, currentMinute),
+      new Response(JSON.stringify(rows), {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": `public, max-age=${VACANCY_STALE_MINUTES * 60}`,
+          "X-Grupo-Avitar-Cache-Minute": String(currentMinute),
+        },
+      }),
+    );
+    return rows;
+  } catch (error) {
+    for (
+      let minute = currentMinute - 1;
+      minute >= currentMinute - VACANCY_STALE_MINUTES;
+      minute -= 1
+    ) {
+      const stale = await cache.match(vacancyCacheKey(env, minute));
+      if (stale) {
+        console.warn("[empleos] Usando caché anterior por fallo de Supabase.");
+        return stale.json();
+      }
+    }
+    throw error;
   }
-  return vacancies.slice(0, maxVacancies);
 }
 
 function cleanupQueryUrl(env, cutoff, olderThan, offset) {
@@ -1610,28 +1548,19 @@ export default {
         return htmlResponse(request, "<!doctype html><title>Solicitud inválida</title>", 400, {}, env);
       }
 
-      let vacancies = [];
-      if (isHomeRoute) {
-        vacancies = await getVacancies(env, now, {}, MAX_QUERY_ROWS);
-      } else if (url.pathname === "/sitemap.xml") {
-        vacancies = await getVacancies(env, now, {}, MAX_QUERY_ROWS);
-      } else if (filters) {
-        vacancies = await getVacancies(
-          env,
-          now,
-          filters,
-          filters.filtersApplied ? filters.page * PAGE_SIZE + 1 : PAGE_SIZE,
-        );
-      } else {
-        const slug = url.pathname.slice("/empleos/".length);
+      let slug = "";
+      if (!isHomeRoute && url.pathname !== "/sitemap.xml" && !filters) {
+        slug = url.pathname.slice("/empleos/".length);
         const idPrefix = slug.match(/-([0-9a-f]{8})$/i)?.[1];
         if (!slug || slug.includes("/") || !idPrefix) {
           return htmlResponse(request, "<!doctype html><title>Oferta no encontrada</title>", 404, {
             "Cache-Control": "no-store",
           }, env);
         }
-        vacancies = await getVacancies(env, now, {}, MAX_QUERY_ROWS);
       }
+
+      const rows = await getActiveVacancies(env, now);
+      const vacancies = activeVacancies(rows, env.SUPABASE_URL, now);
 
       if (isHomeRoute) {
         const assetResponse = await env.ASSETS.fetch(request);
@@ -1662,7 +1591,6 @@ export default {
         return renderSitemap(env, vacancies, request.method === "HEAD");
       }
       if (filters) return renderListing(request, env, vacancies, filters);
-      const slug = url.pathname.slice("/empleos/".length);
       return renderDetail(request, env, vacancies, slug);
     } catch (error) {
       console.error("Employment page generation failed", error);
@@ -1679,6 +1607,7 @@ export default {
 export {
   activeVacancies,
   displayValue,
+  getActiveVacancies,
   isPublicSupabaseKey,
   isServiceRoleKey,
   isVacancy,

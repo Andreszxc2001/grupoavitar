@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import worker from "../worker.mjs";
 import {
   activeVacancies,
+  getActiveVacancies,
   isPublicSupabaseKey,
   isServiceRoleKey,
   isVacancy,
@@ -539,7 +540,7 @@ test("renders listings and job detail as server HTML with canonical metadata", a
       assert.ok(sitemapXml.includes(`<loc>https://grupoavitar.com${path}</loc>`), path);
     }
 
-    assert.ok(supabaseReads >= 4);
+    assert.equal(supabaseReads, 1);
     assert.equal(forwardedKey, ANON_KEY);
     assert.equal(detailHtml.includes(SERVICE_KEY), false);
     assert.equal(noImageDetailHtml.includes(SERVICE_KEY), false);
@@ -585,19 +586,15 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
   });
   let supabaseReads = 0;
   const requestedLimits = [];
+  const supabaseOrFilters = [];
   globalThis.fetch = async (requestUrl) => {
     supabaseReads += 1;
     const query = new URL(requestUrl);
     const limit = Number(query.searchParams.get("limit"));
     const offset = Number(query.searchParams.get("offset") || 0);
     requestedLimits.push({ limit, offset });
-    const orFilters = query.searchParams.getAll("or");
-    const matches = posts.filter((post) => orFilters.every((filter) => {
-      const patterns = [...filter.matchAll(/ilike\.\*([^*]+)\*/g)].map((match) => match[1]);
-      return patterns.some((pattern) => [JSON.stringify(post.texto_ia), post.texto_ocr, post.canal_nombre]
-        .some((value) => String(value).toLowerCase().includes(pattern)));
-    }));
-    return new Response(JSON.stringify(matches.slice(offset, offset + limit)), {
+    supabaseOrFilters.push(...query.searchParams.getAll("or"));
+    return new Response(JSON.stringify(posts.slice(offset, offset + limit)), {
       headers: { "Content-Type": "application/json" },
     });
   };
@@ -619,7 +616,8 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
     assert.equal(listing.status, 200);
     assert.equal((listingHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 50);
     assert.match(listingHtml, /Mostrando 50 en esta página/);
-    assert.deepEqual(requestedLimits[0], { limit: 100, offset: 0 });
+    assert.deepEqual(requestedLimits[0], { limit: 1000, offset: 0 });
+    assert.deepEqual(supabaseOrFilters, []);
 
     const secondPage = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?page=2"),
@@ -669,7 +667,7 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
     assert.match(homepageHtml, /"@type":"SearchAction"/);
     assert.match(homepageHtml, /empleos\?q=\{search_term_string\}/);
     assert.doesNotMatch(homepageHtml, /FEATURED_JOBS|HOME_SEO/);
-    assert.ok(supabaseReads >= 5);
+    assert.equal(supabaseReads, 1);
   } finally {
     globalThis.caches = previousCache;
     globalThis.fetch = previousFetch;
@@ -717,8 +715,77 @@ test("la caché pública usa claves anónimas y rechaza claves de servicio", asy
       SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
     });
     assert.equal(blocked.status, 503);
-    assert.equal(supabaseReads, 2);
+    assert.equal(supabaseReads, 1);
   } finally {
+    globalThis.caches = previousCache;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("getActiveVacancies consulta una sola vez por minuto sin filtros de Supabase", async () => {
+  const previousCache = globalThis.caches;
+  const previousFetch = globalThis.fetch;
+  const cache = new Map();
+  const requestedUrls = [];
+  globalThis.caches = {
+    default: {
+      match: async (request) => cache.get(request.url)?.clone(),
+      put: async (request, response) => cache.set(request.url, response.clone()),
+    },
+  };
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(new URL(String(url)));
+    return new Response(JSON.stringify([publication()]), {
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  const env = { SUPABASE_URL, SUPABASE_ANON_KEY: ANON_KEY, SITE_URL: "https://grupoavitar.com" };
+  try {
+    const first = await getActiveVacancies(env, new Date("2026-11-15T12:00:10.000Z"));
+    const second = await getActiveVacancies(env, new Date("2026-11-15T12:00:59.000Z"));
+    assert.deepEqual(second, first);
+    assert.equal(requestedUrls.length, 1);
+    assert.equal(requestedUrls[0].searchParams.get("limit"), "1000");
+    assert.equal(requestedUrls[0].searchParams.getAll("or").length, 0);
+    assert.equal(requestedUrls[0].searchParams.getAll("offset").length, 0);
+    assert.ok(cache.size > 0);
+  } finally {
+    globalThis.caches = previousCache;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("getActiveVacancies usa caché anterior hasta 10 minutos y luego falla", async () => {
+  const previousCache = globalThis.caches;
+  const previousFetch = globalThis.fetch;
+  const previousWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(" "));
+  const cache = new Map();
+  globalThis.caches = {
+    default: {
+      match: async (request) => cache.get(request.url)?.clone(),
+      put: async (request, response) => cache.set(request.url, response.clone()),
+    },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify([publication()]), {
+    headers: { "Content-Type": "application/json" },
+  });
+  const env = { SUPABASE_URL, SUPABASE_ANON_KEY: ANON_KEY, SITE_URL: "https://grupoavitar.com" };
+  try {
+    await getActiveVacancies(env, new Date("2026-11-15T12:00:00.000Z"));
+    globalThis.fetch = async () => {
+      throw new Error("Supabase no disponible");
+    };
+    const fallback = await getActiveVacancies(env, new Date("2026-11-15T12:09:00.000Z"));
+    assert.equal(fallback.length, 1);
+    assert.ok(warnings.some((line) => line.includes("caché anterior")));
+    await assert.rejects(
+      getActiveVacancies(env, new Date("2026-11-15T12:11:00.000Z")),
+      /Supabase no disponible/,
+    );
+  } finally {
+    console.warn = previousWarn;
     globalThis.caches = previousCache;
     globalThis.fetch = previousFetch;
   }

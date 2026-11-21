@@ -13,6 +13,12 @@ El Worker público responde 503 si detecta `SUPABASE_SERVICE_ROLE_KEY` o `SUPABA
 
 Para publicar, el dueño configura los secretos con `wrangler secret put` **en el Worker de limpieza** y despliega ambos Workers por separado. No hay secretos en `wrangler.jsonc`, `_headers` ni archivos versionados.
 
+## Consultas y caché
+
+El Worker público hace una sola consulta a `canales_publicaciones` por minuto, con `limit=1000` y el corte de 15 días calculado sobre el minuto exacto. La respuesta se guarda en `caches.default` y la reutilizan home, listado, detalle y sitemap. Los filtros de búsqueda, ciudad y fecha se aplican en el Worker sobre esa respuesta; no se envían condiciones `or` a Supabase.
+
+Si Supabase falla, el Worker usa la caché de los 10 minutos anteriores y registra una advertencia genérica. Agotado ese margen, responde 503 con un mensaje que no revela detalles internos.
+
 ## Limpieza segura
 
 - `CLEANUP_DRY_RUN` está en `"true"` por defecto: el cron solo registra ID y motivo de lo que borraría. Para ejecutar borrados reales, el dueño debe cambiar esa variable de forma explícita y deliberada.
