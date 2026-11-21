@@ -1148,6 +1148,58 @@ test("Google Tag Manager is installed on every static page", () => {
   }
 });
 
+test("SEO de páginas estáticas: canonical único, URLs limpias e imágenes locales", () => {
+  const root = new URL("../", import.meta.url);
+  const files = readdirSync(root).filter((name) => name.endsWith(".html"));
+  const titles = [];
+  for (const name of files) {
+    const html = readFileSync(new URL(name, root), "utf8");
+    const title = html.match(/<title>([^<]+)<\/title>/)?.[1];
+    assert.ok(title, name);
+    titles.push(title);
+    assert.match(html, /<link rel="canonical" href="https:\/\/grupoavitar\.com\/[^"]*">/, name);
+    assert.doesNotMatch(html, /href="[^"]*\.html/, name);
+    assert.doesNotMatch(html, /images\.unsplash\.com/, name);
+    assert.match(html, /<meta property="og:title"/, name);
+    assert.doesNotMatch(html, /informaci  n|Redacci  n|selecci  n|presentaci  n/, name);
+  }
+  assert.equal(new Set(titles).size, files.length);
+});
+
+test("el layout dinámico carga jobs.css en lugar de estilos en línea", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify([]), {
+    headers: { "Content-Type": "application/json" },
+  });
+  try {
+    const response = await worker.fetch(new Request("https://grupoavitar.com/empleos"), {
+      SUPABASE_URL,
+      SUPABASE_ANON_KEY: ANON_KEY,
+      SITE_URL: "https://grupoavitar.com",
+    });
+    const html = await response.text();
+    assert.match(html, /\/assets\/css\/jobs\.css\?v=20261121/);
+    assert.doesNotMatch(html, /<style>/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
+  }
+});
+
+test("configuración del Worker público usa rutas y deshabilita workers_dev", () => {
+  const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+  assert.equal(config.workers_dev, false);
+  assert.ok(config.routes.length > 0);
+  assert.equal("triggers" in config, false);
+  const jobsCss = readFileSync(new URL("../assets/css/jobs.css", import.meta.url), "utf8");
+  assert.match(jobsCss, /\.jobs-hero \{/);
+  assert.match(jobsCss, /\.jobs-card \{/);
+});
+
 test("_headers replica la CSP y cachea los estáticos", () => {
   const headers = readFileSync(new URL("../_headers", import.meta.url), "utf8");
   assert.match(headers, /Content-Security-Policy: default-src 'self'/);

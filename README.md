@@ -59,7 +59,13 @@ Equivalencias usadas:
 | `fa-calendar-days` | `bi-calendar3` |
 | `fa-bullhorn` | `bi-megaphone` |
 
-CSS y JS locales se sirven con query string de versión (`?v=20261121`) para permitir `Cache-Control` largo en `/assets/*`.
+CSS y JS locales se sirven con query string de versión (`?v=20261121`) para permitir `Cache-Control` largo en `/assets/*`. Los estilos del portal de empleos viven en `assets/css/jobs.css`; el Worker los enlaza en lugar de incrustar un bloque `<style>`.
+
+## SEO de las páginas estáticas
+
+Las 17 páginas tienen título único, descripción, Open Graph y canonical absoluto sin extensión (`https://grupoavitar.com/about`, no `/about.html`). Los enlaces internos también usan rutas limpias y el JS marca el enlace activo comparando la ruta sin extensión. Las dos imágenes de Unsplash se reemplazaron por `/assets/img/profile-img.jpg`, con `width`, `height`, `loading="lazy"` y `decoding="async"`.
+
+`wrangler.jsonc` mantiene `workers_dev: false` para publicar solo por las rutas configuradas en `grupoavitar.com`.
 
 ## Desarrollo y pruebas
 
