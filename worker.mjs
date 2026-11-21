@@ -956,6 +956,65 @@ function itemListJsonLd(vacancies, siteUrl) {
   });
 }
 
+function breadcrumbJsonLd(items) {
+  return jsonLd({
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: items.map((item, index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      name: item.name,
+      item: item.url,
+    })),
+  });
+}
+
+function cityFromVacancy(vacancy) {
+  const city = text(vacancy.location).split(",")[0].trim();
+  return isUnavailable(city) ? "" : city.slice(0, 100);
+}
+
+function cityGroups(vacancies) {
+  const groups = new Map();
+  for (const vacancy of vacancies) {
+    const label = cityFromVacancy(vacancy);
+    const key = normalize(label);
+    const slug = slugify(label);
+    if (!key || !slug) continue;
+    const group = groups.get(key) || { key, slug, labels: new Map(), vacancies: [] };
+    group.labels.set(label, (group.labels.get(label) || 0) + 1);
+    group.vacancies.push(vacancy);
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      key: group.key,
+      slug: group.slug,
+      label: [...group.labels.entries()]
+        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "es"))[0][0],
+      count: group.vacancies.length,
+      vacancies: group.vacancies,
+    }))
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label, "es"));
+}
+
+function cityLinks(vacancies, siteUrl) {
+  const cities = cityGroups(vacancies).slice(0, 6);
+  if (!cities.length) return "";
+  return `<section class="jobs-cities" aria-labelledby="jobs-cities-title">
+    <div class="container">
+      <h2 class="section-title h4" id="jobs-cities-title">Empleos por ciudad</h2>
+      <div class="jobs-city-links">${cities.map((city) => `<a class="jobs-city-link" href="${escapeHtml(`${siteUrl}/empleos/ciudad/${city.slug}`)}">${escapeHtml(city.label)} <span>${city.count}</span></a>`).join("")}</div>
+    </div>
+  </section>`;
+}
+
+function parseCityRoute(pathname) {
+  const match = pathname.match(/^\/empleos\/ciudad\/([^/]+)$/);
+  const slug = match?.[1] || "";
+  return /^[a-z0-9-]+$/.test(slug) ? slug : null;
+}
+
 function jobPostingJsonLd(vacancy, siteUrl) {
   if (
     isUnavailable(vacancy.title) ||
@@ -1091,6 +1150,7 @@ function renderFeaturedJobs(vacancies, env) {
         <span><i class="bi bi-lightning-charge" aria-hidden="true"></i> Actualizadas constantemente</span>
       </div>
       ${content}
+      ${cityLinks(vacancies, siteUrl)}
       <div class="mt-5 text-center">
         <a class="btn btn-primary btn-lg" href="/empleos">Ver todas las vacantes <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
       </div>
@@ -1116,6 +1176,13 @@ function parseListingFilters(url) {
   const page = Number(rawPage);
   if (!Number.isSafeInteger(page) || (!filtersApplied && page > 1)) return null;
   return { searchTerm, cityTerm, startDate, endDate, filtersApplied, page };
+}
+
+function parsePageNumber(url) {
+  const rawPage = url.searchParams.get("page") || "1";
+  if (!/^[1-9]\d*$/.test(rawPage)) return null;
+  const page = Number(rawPage);
+  return Number.isSafeInteger(page) && page > 0 ? page : null;
 }
 
 function renderListing(request, env, vacancies, filters) {
@@ -1244,6 +1311,7 @@ function renderListing(request, env, vacancies, filters) {
         : `<p class="card-premium">${emptyMessage}</p>`}
     </div>
     </section>
+    ${cityLinks(vacancies, siteUrl)}
   </main>`;
   return htmlResponse(
     request,
@@ -1254,6 +1322,100 @@ function renderListing(request, env, vacancies, filters) {
       body,
       robots: filtersApplied ? "noindex,follow" : "index,follow",
       structuredData: filtersApplied ? "" : itemListJsonLd(pageItems, siteUrl),
+    }),
+    200,
+    {},
+    env,
+  );
+}
+
+function renderCityPage(request, env, vacancies, city, page) {
+  const siteUrl = env.SITE_URL.replace(/\/+$/, "");
+  const totalPages = Math.max(1, Math.ceil(city.count / PAGE_SIZE));
+  if (page > totalPages) {
+    return unavailableDetailPage(request, env, {
+      status: 404,
+      title: "Página de ciudad no encontrada | Grupo Avitar",
+      heading: "No encontramos esta página de empleos",
+      message: "La ciudad no tiene tantas vacantes activas. Revisa el listado general de empleos.",
+      cacheControl: "no-store",
+    });
+  }
+  const pageItems = city.vacancies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const companyCount = new Set(
+    city.vacancies
+      .map((vacancy) => displayValue(vacancy.company, ""))
+      .filter((company) => company && !isUnavailable(company)),
+  ).size;
+  const vacancyWord = city.count === 1 ? "vacante activa" : "vacantes activas";
+  const companyWord = companyCount === 1 ? "empresa" : "empresas";
+  const summary = `Hay ${city.count} ${vacancyWord} en ${city.label}${companyCount ? `, publicadas por ${companyCount} ${companyWord}` : ""}.`;
+  const canonical = `${siteUrl}/empleos/ciudad/${city.slug}${page > 1 ? `?page=${page}` : ""}`;
+  const title = `Empleos en ${city.label}: ${city.count} ${vacancyWord} | Grupo Avitar`;
+  const description = `${summary} Consulta las ofertas vigentes y postúlate con el contacto publicado por cada anunciante.`;
+  const pagination = totalPages > 1
+    ? `<nav class="jobs-pagination d-flex justify-content-center gap-2 mt-5" aria-label="Paginación">${Array.from({ length: totalPages }, (_, index) => {
+        const pageNumber = index + 1;
+        const href = `/empleos/ciudad/${city.slug}${pageNumber > 1 ? `?page=${pageNumber}` : ""}`;
+        return `<a class="btn btn-light-custom ${pageNumber === page ? "active" : ""}" href="${escapeHtml(href)}"${pageNumber === page ? ' aria-current="page"' : ""}>${pageNumber}</a>`;
+      }).join("")}</nav>`
+    : "";
+  const body = `<main class="jobs-page jobs-city-page">
+    <header class="jobs-hero">
+      <div class="container">
+        <div class="row align-items-center g-5">
+          <div class="col-lg-8 jobs-hero-copy">
+            <span class="jobs-kicker">Empleo · ${escapeHtml(city.label)}</span>
+            <h1>Empleos en ${escapeHtml(city.label)}</h1>
+            <p>${escapeHtml(summary)}</p>
+            <div class="jobs-hero-stats">
+              <div class="jobs-hero-count"><strong>${city.count}</strong><span>${vacancyWord}</span></div>
+              <span class="jobs-validity">Publicaciones vigentes durante 15 días</span>
+            </div>
+          </div>
+          <div class="col-lg-4">
+            <div class="jobs-hero-art" aria-hidden="true">
+              <div class="jobs-hero-card">
+                <span class="jobs-art-icon"><i class="bi bi-geo-alt" aria-hidden="true"></i></span>
+                <h2>Oportunidades en ${escapeHtml(city.label)}</h2>
+                <p>Revisa el detalle y el contacto de cada vacante.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+    <section class="jobs-content">
+      <div class="container">
+        <nav aria-label="Ruta de navegación" class="jobs-detail-breadcrumb">
+          <a href="/">Inicio</a> <span aria-hidden="true">/</span> <a href="/empleos">Empleos</a> <span aria-hidden="true">/</span> <span aria-current="page">${escapeHtml(city.label)}</span>
+        </nav>
+        <header class="jobs-section-head">
+          <div>
+            <span class="eyebrow">Ofertas en ${escapeHtml(city.label)}</span>
+            <h2>Vacantes disponibles</h2>
+            <p>${escapeHtml(summary)}</p>
+          </div>
+          <span class="jobs-result-count">${city.count} ${vacancyWord}<small class="d-block fw-normal">Mostrando ${pageItems.length} en esta página</small></span>
+        </header>
+        <div class="row g-4">${pageItems.map((vacancy) => listingCard(vacancy, siteUrl)).join("")}</div>
+        ${pagination}
+      </div>
+    </section>
+    ${cityLinks(vacancies, siteUrl)}
+  </main>`;
+  return htmlResponse(
+    request,
+    layout({
+      title,
+      description,
+      canonical,
+      body,
+      structuredData: `${breadcrumbJsonLd([
+        { name: "Inicio", url: `${siteUrl}/` },
+        { name: "Empleos", url: `${siteUrl}/empleos` },
+        { name: city.label, url: canonical },
+      ])}${itemListJsonLd(pageItems, siteUrl)}`,
     }),
     200,
     {},
@@ -1413,6 +1575,7 @@ function renderSitemap(env, vacancies, head = false) {
     `${siteUrl}/`,
     ...STATIC_PAGE_PATHS.map((path) => `${siteUrl}${path}`),
     `${siteUrl}/empleos`,
+    ...cityGroups(vacancies).slice(0, 6).map((city) => `${siteUrl}/empleos/ciudad/${city.slug}`),
     ...vacancies.map((vacancy) => `${siteUrl}/empleos/${vacancy.slug}`),
   ];
   const body = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls
@@ -1559,12 +1722,13 @@ export default {
     try {
       const now = new Date();
       const filters = url.pathname === "/empleos" ? parseListingFilters(url) : null;
+      const cityRouteSlug = parseCityRoute(url.pathname);
       if (url.pathname === "/empleos" && !filters) {
         return htmlResponse(request, "<!doctype html><title>Solicitud inválida</title>", 400, {}, env);
       }
 
       let slug = "";
-      if (!isHomeRoute && url.pathname !== "/sitemap.xml" && !filters) {
+      if (!isHomeRoute && url.pathname !== "/sitemap.xml" && !filters && !cityRouteSlug) {
         slug = url.pathname.slice("/empleos/".length);
         const idPrefix = slug.match(/-([0-9a-f]{8})$/i)?.[1];
         if (!slug || slug.includes("/") || !idPrefix) {
@@ -1580,6 +1744,23 @@ export default {
 
       const rows = await getActiveVacancies(env, now);
       const vacancies = activeVacancies(rows, env.SUPABASE_URL, now);
+
+      if (cityRouteSlug) {
+        const page = parsePageNumber(url);
+        const city = page
+          ? cityGroups(vacancies).find((item) => item.slug === cityRouteSlug && item.count >= 3)
+          : null;
+        if (!city) {
+          return unavailableDetailPage(request, env, {
+            status: 404,
+            title: "Empleos por ciudad no encontrados | Grupo Avitar",
+            heading: "No encontramos vacantes suficientes en esta ciudad",
+            message: "La página requiere al menos tres vacantes activas. Consulta el listado general de empleos.",
+            cacheControl: "no-store",
+          });
+        }
+        return renderCityPage(request, env, vacancies, city, page);
+      }
 
       if (isHomeRoute) {
         const assetResponse = await env.ASSETS.fetch(request);

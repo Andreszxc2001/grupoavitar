@@ -1092,6 +1092,122 @@ test("JobPosting usa datos verificables y el detalle separa postulación del ser
   }
 });
 
+test("ciudades agrupan variantes, publican solo con tres vacantes y enlazan las seis principales", async () => {
+  const citySpecs = [
+    { label: "Bogotá", locations: ["Bogotá, Bogotá D.C.", "Bogotá, Bogotá D.C.", "Bogota, Bogota D.C."] },
+    { label: "Barranquilla", locations: ["Barranquilla, Atlántico", "Barranquilla, Atlántico", "Barranquilla, Atlantico"] },
+    { label: "Bucaramanga", locations: ["Bucaramanga, Santander", "Bucaramanga, Santander", "Bucaramanga, Santander"] },
+    { label: "Cali", locations: ["Cali, Valle del Cauca", "Cali, Valle del Cauca", "Cali, Valle del Cauca"] },
+    { label: "Cartagena", locations: ["Cartagena, Bolívar", "Cartagena, Bolívar", "Cartagena, Bolivar"] },
+    { label: "Medellín", locations: ["Medellín, Antioquia", "Medellín, Antioquia", "Medellin, Antioquia"] },
+    { label: "Pereira", locations: ["Pereira, Risaralda", "Pereira, Risaralda"] },
+  ];
+  const posts = [];
+  let index = 0;
+  for (const spec of citySpecs) {
+    for (const location of spec.locations) {
+      index += 1;
+      const prefix = (0x20000000 + index).toString(16).padStart(8, "0");
+      posts.push(publication({
+        id: `${prefix}-1234-1234-1234-123456789abc`,
+        texto_ia: {
+          cargo: `Auxiliar ${index}`,
+          titulo: `Auxiliar ${index}`,
+          empresa: `Empresa ${index}`,
+          salario: "No disponible",
+          contacto: {
+            link: "No disponible",
+            correo: "No disponible",
+            telefono: "No disponible",
+          },
+          ubicacion: location,
+          requisitos: ["Disponibilidad inmediata"],
+          descripcion: `Auxiliar ${index} en ${location}.`,
+          tipo_contrato: "No disponible",
+        },
+        imagen_url: "post/ciudad.jpg",
+      }));
+    }
+  }
+
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify(posts), {
+    headers: { "Content-Type": "application/json" },
+  });
+  const env = {
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY: ANON_KEY,
+    SITE_URL: "https://grupoavitar.com",
+    ASSETS: {
+      fetch: async () => new Response(
+        "<!doctype html><html><head><!-- HOME_SEO --></head><body><!-- FEATURED_JOBS --></body></html>",
+        { headers: { "Content-Type": "text/html; charset=utf-8" } },
+      ),
+    },
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/ciudad/bogota"),
+      env,
+    );
+    const html = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(html, /<h1>Empleos en Bogotá<\/h1>/);
+    assert.match(html, /Hay 3 vacantes activas en Bogotá, publicadas por 3 empresas/);
+    assert.match(html, /<title>Empleos en Bogotá: 3 vacantes activas \| Grupo Avitar<\/title>/);
+    assert.match(
+      html,
+      /<link rel="canonical" href="https:\/\/grupoavitar\.com\/empleos\/ciudad\/bogota">/,
+    );
+    assert.equal((html.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 3);
+    const itemList = jsonLdFromHtml(html, "ItemList");
+    const breadcrumb = jsonLdFromHtml(html, "BreadcrumbList");
+    assert.ok(itemList);
+    assert.ok(breadcrumb);
+    assert.equal(itemList.itemListElement.length, 3);
+    assert.match(itemList.itemListElement[0].url, /\/empleos\/auxiliar-1-/);
+    assert.equal(breadcrumb.itemListElement[2].name, "Bogotá");
+    assert.equal(breadcrumb.itemListElement[2].item, "https://grupoavitar.com/empleos/ciudad/bogota");
+
+    const sinTres = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/ciudad/pereira"),
+      env,
+    );
+    const sinTresHtml = await sinTres.text();
+    assert.equal(sinTres.status, 404);
+    assert.match(sinTresHtml, /<meta name="robots" content="noindex,follow">/);
+    assert.match(sinTresHtml, /No encontramos vacantes suficientes en esta ciudad/);
+
+    const listing = await worker.fetch(new Request("https://grupoavitar.com/empleos"), env);
+    const listingHtml = await listing.text();
+    const home = await worker.fetch(new Request("https://grupoavitar.com/"), env);
+    const homeHtml = await home.text();
+    const sitemap = await worker.fetch(new Request("https://grupoavitar.com/sitemap.xml"), env);
+    const sitemapXml = await sitemap.text();
+    for (const path of [
+      "/empleos/ciudad/bogota",
+      "/empleos/ciudad/barranquilla",
+      "/empleos/ciudad/bucaramanga",
+      "/empleos/ciudad/cali",
+      "/empleos/ciudad/cartagena",
+      "/empleos/ciudad/medellin",
+    ]) {
+      assert.match(listingHtml, new RegExp(`href="https://grupoavitar\\.com${path}"`));
+      assert.match(homeHtml, new RegExp(`href="https://grupoavitar\\.com${path}"`));
+      assert.ok(sitemapXml.includes(`<loc>https://grupoavitar.com${path}</loc>`), path);
+    }
+    assert.doesNotMatch(listingHtml, /href="https:\/\/grupoavitar\.com\/empleos\/ciudad\/pereira"/);
+    assert.doesNotMatch(sitemapXml, /\/empleos\/ciudad\/pereira/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
+  }
+});
+
 function mockCleanupFetch({ oldRows = [], recentRows = [], imageStatus = () => 200 } = {}) {
   const deletedBatches = [];
   const readOffsets = [];
