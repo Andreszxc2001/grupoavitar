@@ -356,17 +356,13 @@ function activeVacancies(publications, supabaseUrl, now = new Date()) {
   const expiryBoundary = now.getTime() - PUBLICATION_DAYS * 24 * 60 * 60 * 1000;
   const seen = new Set();
   const vacancies = [];
-  const recentFirst = [...publications].sort(
-    (left, right) =>
-      Date.parse(right.fecha_publicacion) - Date.parse(left.fecha_publicacion),
-  );
-  for (const publication of recentFirst) {
+  // Supabase ya entrega las filas ordenadas por fecha desc: no hace falta reordenar.
+  for (const publication of publications) {
     const publishedAt = new Date(publication.fecha_publicacion).getTime();
     if (
       !Number.isFinite(publishedAt) ||
       publishedAt > now.getTime() ||
-      publishedAt <= expiryBoundary ||
-      !isVacancy(publication)
+      publishedAt <= expiryBoundary
     ) {
       continue;
     }
@@ -385,6 +381,7 @@ function publicationQueryUrl(env, now) {
   const url = new URL("/rest/v1/canales_publicaciones", env.SUPABASE_URL);
   url.searchParams.set("select", PUBLICATION_FIELDS);
   url.searchParams.set("fecha_publicacion", `gte.${cutoff}`);
+  url.searchParams.set("imagen_url", "not.is.null");
   url.searchParams.set("order", "fecha_publicacion.desc");
   url.searchParams.set("limit", String(QUERY_ROW_LIMIT));
   return url;
@@ -408,6 +405,45 @@ async function fetchPublicationRows(env, now, url = publicationQueryUrl(env, now
   const rows = await response.json();
   if (!Array.isArray(rows)) throw new Error("Respuesta inválida de Supabase.");
   return rows;
+}
+
+const PROCESSED_FRESH_SECONDS = 300;   // se refresca cada 5 min
+const PROCESSED_KEEP_SECONDS = 3600;   // se conserva 1 h como respaldo si Supabase falla
+
+function processedCacheKey(env) {
+  const siteUrl = env.SITE_URL.replace(/\/+$/, "");
+  return new Request(`${siteUrl}/__cache/vacantes-procesadas-v1`);
+}
+
+async function buildProcessedVacancies(env, now) {
+  const rows = await fetchPublicationRows(env, now);
+  const vacancies = activeVacancies(rows, env.SUPABASE_URL, now);
+  for (const vacancy of vacancies) delete vacancy.duplicateKey;
+  const cache = caches.default;
+  await cache.put(
+    processedCacheKey(env),
+    new Response(JSON.stringify(vacancies), {
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": `public, max-age=${PROCESSED_KEEP_SECONDS}`,
+        "X-Stored-At": String(Date.now()),
+      },
+    }),
+  );
+  return vacancies;
+}
+
+async function getVacancies(env, ctx, now) {
+  const cache = caches.default;
+  const cached = await cache.match(processedCacheKey(env));
+  if (cached) {
+    const age = now.getTime() - (Number(cached.headers.get("X-Stored-At")) || 0);
+    if (age > PROCESSED_FRESH_SECONDS * 1000) {
+      ctx.waitUntil(buildProcessedVacancies(env, now).catch((e) => console.warn("refresh falló", e)));
+    }
+    return cached.json();
+  }
+  return buildProcessedVacancies(env, now);
 }
 
 function vacancyCacheKey(env, minute) {
@@ -686,7 +722,7 @@ function htmlResponse(request, html, status = 200, extraHeaders = {}, env = {}) 
   return new Response(request.method === "HEAD" ? null : html, {
     status,
     headers: responseHeaders("text/html; charset=utf-8", {
-      "Cache-Control": "public, max-age=60, s-maxage=60",
+      "Cache-Control": "public, max-age=60, s-maxage=300",
       ...extraHeaders,
     }, env),
   });
@@ -1600,7 +1636,7 @@ function renderSitemap(env, vacancies, head = false) {
   const body = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${entries.join("")}</urlset>`;
   return new Response(head ? null : body, {
     headers: responseHeaders("application/xml; charset=utf-8", {
-      "Cache-Control": "public, max-age=60, s-maxage=60",
+      "Cache-Control": "public, max-age=60, s-maxage=300",
     }, env),
   });
 }
@@ -1688,8 +1724,9 @@ function validCleanupEnvironment(env) {
   }
 }
 
-export default {
-  async fetch(request, env) {
+const CACHEABLE_PATH = /^\/(index\.html|empleos(\/.*)?|sitemap\.xml)?$/;
+
+async function handleRequest(request, env, ctx) {
     if (hasPrivilegedKey(env)) {
       console.error("Configuración insegura: el Worker público no debe tener claves de servicio");
       return new Response("No fue posible cargar las ofertas en este momento.", {
@@ -1759,8 +1796,7 @@ export default {
         }
       }
 
-      const rows = await getActiveVacancies(env, now);
-      const vacancies = activeVacancies(rows, env.SUPABASE_URL, now);
+      const vacancies = await getVacancies(env, ctx, now);
 
       if (cityRouteSlug) {
         const page = parsePageNumber(url);
@@ -1794,7 +1830,7 @@ export default {
         headers.delete("Content-Encoding");
         headers.delete("ETag");
         headers.set("Content-Type", "text/html; charset=utf-8");
-        headers.set("Cache-Control", "public, max-age=60, s-maxage=60");
+        headers.set("Cache-Control", "public, max-age=60, s-maxage=300");
         applySecurityHeaders(headers, env);
         const siteUrl = env.SITE_URL.replace(/\/+$/, "");
         return new Response(
@@ -1818,6 +1854,22 @@ export default {
         }, env),
       });
     }
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (request.method !== "GET" || !CACHEABLE_PATH.test(url.pathname)) {
+      return handleRequest(request, env, ctx);
+    }
+    const cache = caches.default;
+    const hit = await cache.match(request);
+    if (hit) return hit;
+    const response = await handleRequest(request, env, ctx);
+    if (response.status === 200 && /s-maxage/.test(response.headers.get("Cache-Control") || "")) {
+      ctx.waitUntil(cache.put(request, response.clone()));
+    }
+    return response;
   },
 };
 
