@@ -4,6 +4,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import worker from "../worker.mjs";
 import {
   activeVacancies,
+  getActiveVacancies,
   isPublicSupabaseKey,
   isServiceRoleKey,
   isVacancy,
@@ -15,6 +16,18 @@ import {
 
 const SUPABASE_URL = "https://example.supabase.co";
 const NOW = new Date("2026-11-15T12:00:00.000Z");
+const ANON_KEY = `header.${Buffer.from(JSON.stringify({ role: "anon" })).toString("base64url")}.signature`;
+const SERVICE_KEY = `header.${Buffer.from(JSON.stringify({ role: "service_role" })).toString("base64url")}.signature`;
+
+function jsonLdFromHtml(html, type) {
+  const scripts = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g) || [];
+  for (const script of scripts) {
+    const raw = script.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "");
+    const data = JSON.parse(raw);
+    if (data["@type"] === type) return data;
+  }
+  return null;
+}
 
 function publication(overrides = {}) {
   return {
@@ -134,16 +147,61 @@ test("reads vacancy fields from JSON data", () => {
   assert.equal(vacancy.salary, "$1.500.000");
 });
 
-test("keeps image URLs untransformed and resolves storage object paths", () => {
+test("acepta imágenes solo del bucket propio de Supabase", () => {
+  const bucket = "https://example.supabase.co/storage/v1/object/public/imagenes_posts/";
   assert.equal(
     resolveImageUrl("post/foto original.jpg", SUPABASE_URL),
-    "https://example.supabase.co/storage/v1/object/public/imagenes_posts/post/foto%20original.jpg",
+    `${bucket}post/foto%20original.jpg`,
   );
-  assert.equal(
-    resolveImageUrl("https://cdn.example.com/original.jpg", SUPABASE_URL),
+  assert.equal(resolveImageUrl("imagenes_posts/post/foto.jpg", SUPABASE_URL), `${bucket}post/foto.jpg`);
+  assert.equal(resolveImageUrl(`${bucket}post/foto.jpg`, SUPABASE_URL), `${bucket}post/foto.jpg`);
+  assert.equal(resolveImageUrl("/storage/v1/object/public/imagenes_posts/post/foto.jpg", SUPABASE_URL), `${bucket}post/foto.jpg`);
+  for (const invalid of [
     "https://cdn.example.com/original.jpg",
-  );
-  assert.equal(resolveImageUrl("javascript:alert(1)", SUPABASE_URL), "");
+    "http://example.supabase.co/storage/v1/object/public/imagenes_posts/post/foto.jpg",
+    "https://example.supabase.co/storage/v1/object/public/otros/post/foto.jpg",
+    "https://example.supabase.co.evil.com/storage/v1/object/public/imagenes_posts/post/foto.jpg",
+    "data:image/png;base64,AAAA",
+    "javascript:alert(1)",
+    "post/../secreto.jpg",
+    "post/%2e%2e/secreto.jpg",
+    "/storage/v1/object/public/imagenes_posts/../secreto.jpg",
+  ]) {
+    assert.equal(resolveImageUrl(invalid, SUPABASE_URL), "", invalid);
+  }
+});
+
+test("cabeceras de seguridad presentes en HTML, XML y texto", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify([]), {
+    headers: { "Content-Type": "application/json" },
+  });
+  const env = {
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY: ANON_KEY,
+    SITE_URL: "https://grupoavitar.com",
+  };
+  try {
+    for (const path of ["/empleos", "/sitemap.xml", "/robots.txt"]) {
+      const response = await worker.fetch(new Request(`https://grupoavitar.com${path}`), env);
+      assert.equal(response.status, 200, path);
+      assert.match(response.headers.get("content-security-policy"), /img-src 'self' data: https:\/\/example\.supabase\.co/, path);
+      assert.match(response.headers.get("content-security-policy"), /frame-ancestors 'none'/, path);
+      assert.equal(response.headers.get("x-frame-options"), "DENY", path);
+      assert.equal(response.headers.get("permissions-policy"), "camera=(), microphone=(), geolocation=(), payment=(), usb=()", path);
+      assert.equal(response.headers.get("cross-origin-opener-policy"), "same-origin", path);
+      assert.equal(response.headers.get("x-content-type-options"), "nosniff", path);
+      assert.equal(response.headers.get("referrer-policy"), "strict-origin-when-cross-origin", path);
+      assert.equal(response.headers.get("strict-transport-security"), null, path);
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
+  }
 });
 
 test("reads vacancy data from JSON posts and fills missing values with No disponible", () => {
@@ -172,6 +230,69 @@ test("reads vacancy data from JSON posts and fills missing values with No dispon
   assert.equal(complete.contactEmail, "empleos@example.com");
   assert.equal(complete.contactPhone, "300 944 1676");
   assert.match(complete.contactUrl, /^https:\/\/wa\.me\//);
+});
+
+test("slug omite No disponible y el detalle usa 301, 410 y 404", async () => {
+  const base = publication();
+  const sinUbicacion = publication({
+    id: "abcdef12-1234-1234-1234-123456789abc",
+    texto_ia: { ...base.texto_ia, ubicacion: "No disponible" },
+  });
+  const [vacancy] = activeVacancies([sinUbicacion], SUPABASE_URL, NOW);
+  assert.equal(vacancy.slug, "panadero-artesanal-abcdef12");
+  assert.doesNotMatch(vacancy.slug, /no-disponible/);
+
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify([sinUbicacion]), {
+    headers: { "Content-Type": "application/json" },
+  });
+  const env = {
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY: ANON_KEY,
+    SITE_URL: "https://grupoavitar.com",
+  };
+  try {
+    const anterior = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/panadero-artesanal-no-disponible-abcdef12"),
+      env,
+    );
+    assert.equal(anterior.status, 301);
+    assert.equal(anterior.headers.get("location"), "/empleos/panadero-artesanal-abcdef12");
+
+    const canonico = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/panadero-artesanal-abcdef12"),
+      env,
+    );
+    assert.equal(canonico.status, 200);
+
+    const vencida = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/vacante-antigua-99999999"),
+      env,
+    );
+    const vencidaHtml = await vencida.text();
+    assert.equal(vencida.status, 410);
+    assert.match(vencidaHtml, /^<!doctype html>\s*<html lang="es">/);
+    assert.match(vencidaHtml, /<meta name="robots" content="noindex,follow">/);
+    assert.match(vencidaHtml, /<a href="\/empleos">Ver ofertas vigentes<\/a>/);
+    assert.match(vencida.headers.get("cache-control"), /^public, max-age=\d+$/);
+
+    const invalida = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/vacante-sin-sufijo"),
+      env,
+    );
+    const invalidaHtml = await invalida.text();
+    assert.equal(invalida.status, 404);
+    assert.match(invalidaHtml, /^<!doctype html>\s*<html lang="es">/);
+    assert.match(invalidaHtml, /<meta name="robots" content="noindex,follow">/);
+    assert.match(invalidaHtml, /<a href="\/empleos">Ver ofertas vigentes<\/a>/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
+  }
 });
 
 test("includes only current publications and deduplicates identical source text", () => {
@@ -226,7 +347,71 @@ test("refuses a Supabase service-role key and accepts public keys", () => {
   assert.equal(isPublicSupabaseKey(`header.${encode({ role: "anon" })}.signature`), true);
   assert.equal(isPublicSupabaseKey("sb_publishable_example"), true);
   assert.equal(isServiceRoleKey(`header.${encode({ role: "service_role" })}.signature`), true);
+  assert.equal(isServiceRoleKey("sb_secret_example"), true);
   assert.equal(isServiceRoleKey(undefined), false);
+});
+
+test("rechaza claves de servicio en el Worker público", async () => {
+  const previousFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("no debería consultar Supabase");
+  };
+  const logs = [];
+  const previousError = console.error;
+  console.error = (...args) => logs.push(args.join(" "));
+  try {
+    for (const [name, value] of Object.entries({
+      SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
+      SUPABASE_SECRET_KEY: "sb_secret_example",
+    })) {
+      const response = await worker.fetch(new Request("https://grupoavitar.com/empleos"), {
+        SUPABASE_URL,
+        SUPABASE_ANON_KEY: ANON_KEY,
+        SITE_URL: "https://grupoavitar.com",
+        [name]: value,
+      });
+      assert.equal(response.status, 503);
+      assert.match(await response.text(), /No fue posible cargar las ofertas/);
+      assert.match(response.headers.get("content-security-policy"), /frame-ancestors 'none'/);
+    }
+    assert.equal(fetchCalls, 0);
+    assert.ok(logs.some((line) => line.includes("Configuración insegura: el Worker público no debe tener claves de servicio")));
+    assert.equal(logs.some((line) => line.includes(SERVICE_KEY) || line.includes("sb_secret_example")), false);
+  } finally {
+    console.error = previousError;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("envía solo apikey con claves sb_publishable", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: {
+      match: async () => undefined,
+      put: async () => {},
+    },
+  };
+  let headers = {};
+  globalThis.fetch = async (_url, options) => {
+    headers = options.headers;
+    return new Response(JSON.stringify([]), { headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const response = await worker.fetch(new Request("https://grupoavitar.com/empleos"), {
+      SUPABASE_URL,
+      SUPABASE_ANON_KEY: "sb_publishable_example",
+      SITE_URL: "https://grupoavitar.com",
+    });
+    assert.equal(response.status, 200);
+    assert.equal(headers.apikey, "sb_publishable_example");
+    assert.equal(headers.Authorization, undefined);
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
+  }
 });
 
 test("renders listings and job detail as server HTML with canonical metadata", async () => {
@@ -239,7 +424,6 @@ test("renders listings and job detail as server HTML with canonical metadata", a
       put: async (request, response) => cache.set(request.url, response.clone()),
     },
   };
-  const serviceKey = `header.${Buffer.from(JSON.stringify({ role: "service_role" })).toString("base64url")}.signature`;
   let supabaseReads = 0;
   let forwardedKey = "";
   globalThis.fetch = async (_url, options) => {
@@ -295,7 +479,7 @@ test("renders listings and job detail as server HTML with canonical metadata", a
   try {
     const env = {
       SUPABASE_URL,
-      SUPABASE_SERVICE_ROLE_KEY: serviceKey,
+      SUPABASE_ANON_KEY: ANON_KEY,
       SITE_URL: "https://grupoavitar.com",
     };
     const listing = await worker.fetch(
@@ -305,15 +489,15 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     const listingHtml = await listing.text();
     assert.equal(listing.status, 200);
     assert.match(listingHtml, /<h1>Encuentra una oportunidad/);
-    assert.match(listingHtml, /href="\/about\.html">Nosotros/);
-    assert.match(listingHtml, /href="\/services\.html">Servicios/);
+    assert.match(listingHtml, /href="\/about">Nosotros/);
+    assert.match(listingHtml, /href="\/services">Servicios/);
     assert.match(listingHtml, /href="\/empleos" aria-current="page">Empleos/);
-    assert.match(listingHtml, /href="\/contact\.html">Contacto/);
+    assert.match(listingHtml, /href="\/contact">Contacto/);
     assert.match(listingHtml, /id="mainNav"/);
     assert.match(listingHtml, /\/assets\/js\/main\.js/);
     assert.match(listingHtml, /<footer class="footer-nexora">/);
     assert.match(listingHtml, /logo1\.png/);
-    assert.match(listingHtml, /href="\/privacidad\.html"/);
+    assert.match(listingHtml, /href="\/privacidad"/);
     assert.match(listingHtml, /Escribir por WhatsApp/);
     assert.match(listingHtml, /href="\/assets\/favicon\/favicon-32x32\.png"/);
     assert.match(listingHtml, /href="\/assets\/favicon\/favicon\.ico"/);
@@ -327,9 +511,13 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.match(listingHtml, /panadero-artesanal-santa-marta-12345678/);
     assert.match(listingHtml, /src="https:\/\/example\.supabase\.co\/storage\/v1\/object\/public\/imagenes_posts\/post\/foto\.jpg"/);
     assert.doesNotMatch(listingHtml, /empleo-placeholder\.svg/);
-    assert.match(listingHtml, /kit\.fontawesome\.com\/3140323153\.js/);
+    assert.doesNotMatch(listingHtml, /kit\.fontawesome\.com/);
+    assert.match(listingHtml, /integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW\+ALEwIH"/);
+    assert.match(listingHtml, /integrity="sha384-XGjxtQfXaH2tnPFa9x\+ruJTuLE3Aa6LhHSWRr1XeTyhezb4abCG4ccI5AkVDxqC\+"/);
+    assert.match(listingHtml, /<!-- TODO: URL redes -->/);
+    assert.doesNotMatch(listingHtml, /href="#" class="social-icon"/);
     assert.match(listingHtml, /Ver detalle/);
-    assert.match(listingHtml, /fa-solid fa-arrow-right/);
+    assert.match(listingHtml, /bi bi-arrow-right/);
     assert.doesNotMatch(listingHtml, /wa\.me\/573019441676\?text=/);
 
     const filteredListing = await worker.fetch(
@@ -371,7 +559,9 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.match(detailHtml, /"vacancy_slug":"panadero-artesanal-santa-marta-12345678"/);
     assert.match(detailHtml, /"vacancy_company":"Vaz Perfumes"/);
     assert.match(detailHtml, /"vacancy_location":"Santa Marta"/);
-    assert.match(detailHtml, /<h1 class="jobs-detail-title" itemprop="headline">Panadero artesanal<\/h1>/);
+    assert.match(detailHtml, /<h1 class="jobs-detail-title">Panadero artesanal<\/h1>/);
+    assert.doesNotMatch(detailHtml, /itemscope itemtype="https:\/\/schema\.org\/Article"/);
+    assert.doesNotMatch(detailHtml, /itemprop="headline"|itemprop="description"/);
     assert.match(detailHtml, /Publicación reciente/);
     assert.match(detailHtml, /Este portal es informativo/);
     assert.match(detailHtml, /href="\/terminos">Leer Términos y Condiciones<\/a>/);
@@ -379,7 +569,7 @@ test("renders listings and job detail as server HTML with canonical metadata", a
     assert.match(detailHtml, /Información clave/);
     assert.match(detailHtml, /wa\.me\/573019441676\?text=/);
     assert.match(detailHtml, /Crear mi hoja de vida/);
-    assert.match(detailHtml, /fa-brands fa-whatsapp/);
+    assert.match(detailHtml, /bi bi-whatsapp/);
     assert.match(detailHtml, /Panadero%20artesanal/);
     assert.match(detailHtml, /property="og:image"/);
     assert.doesNotMatch(detailHtml, /Se busca panadero artesanal|OCR_ONLY_TEXT_DO_NOT_RENDER|\*\*/);
@@ -389,8 +579,9 @@ test("renders listings and job detail as server HTML with canonical metadata", a
       env,
     );
     const noImageDetailHtml = await noImageDetail.text();
-    assert.equal(noImageDetail.status, 404);
+    assert.equal(noImageDetail.status, 410);
     assert.match(noImageDetailHtml, /Esta oferta ya no está disponible/);
+    assert.match(noImageDetailHtml, /<meta name="robots" content="noindex,follow">/);
     assert.doesNotMatch(noImageDetailHtml, /empleo-placeholder\.svg/);
     assert.match(detailHtml, /Descripción/);
 
@@ -425,10 +616,10 @@ test("renders listings and job detail as server HTML with canonical metadata", a
       assert.ok(sitemapXml.includes(`<loc>https://grupoavitar.com${path}</loc>`), path);
     }
 
-    assert.ok(supabaseReads >= 4);
-    assert.equal(forwardedKey, serviceKey);
-    assert.equal(detailHtml.includes(serviceKey), false);
-    assert.equal(noImageDetailHtml.includes(serviceKey), false);
+    assert.equal(supabaseReads, 1);
+    assert.equal(forwardedKey, ANON_KEY);
+    assert.equal(detailHtml.includes(SERVICE_KEY), false);
+    assert.equal(noImageDetailHtml.includes(SERVICE_KEY), false);
   } finally {
     globalThis.caches = previousCache;
     globalThis.fetch = previousFetch;
@@ -471,19 +662,15 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
   });
   let supabaseReads = 0;
   const requestedLimits = [];
+  const supabaseOrFilters = [];
   globalThis.fetch = async (requestUrl) => {
     supabaseReads += 1;
     const query = new URL(requestUrl);
     const limit = Number(query.searchParams.get("limit"));
     const offset = Number(query.searchParams.get("offset") || 0);
     requestedLimits.push({ limit, offset });
-    const orFilters = query.searchParams.getAll("or");
-    const matches = posts.filter((post) => orFilters.every((filter) => {
-      const patterns = [...filter.matchAll(/ilike\.\*([^*]+)\*/g)].map((match) => match[1]);
-      return patterns.some((pattern) => [JSON.stringify(post.texto_ia), post.texto_ocr, post.canal_nombre]
-        .some((value) => String(value).toLowerCase().includes(pattern)));
-    }));
-    return new Response(JSON.stringify(matches.slice(offset, offset + limit)), {
+    supabaseOrFilters.push(...query.searchParams.getAll("or"));
+    return new Response(JSON.stringify(posts.slice(offset, offset + limit)), {
       headers: { "Content-Type": "application/json" },
     });
   };
@@ -491,7 +678,7 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
   try {
     const env = {
       SUPABASE_URL,
-      SUPABASE_SERVICE_ROLE_KEY: `header.${Buffer.from(JSON.stringify({ role: "service_role" })).toString("base64url")}.signature`,
+      SUPABASE_ANON_KEY: ANON_KEY,
       SITE_URL: "https://grupoavitar.com",
       ASSETS: {
         fetch: async () => new Response(
@@ -505,13 +692,16 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
     assert.equal(listing.status, 200);
     assert.equal((listingHtml.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 50);
     assert.match(listingHtml, /Mostrando 50 en esta página/);
-    assert.deepEqual(requestedLimits[0], { limit: 100, offset: 0 });
+    assert.deepEqual(requestedLimits[0], { limit: 1000, offset: 0 });
+    assert.deepEqual(supabaseOrFilters, []);
 
     const secondPage = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?page=2"),
       env,
     );
-    assert.equal(secondPage.status, 400);
+    assert.equal(secondPage.status, 200);
+    assert.equal((await secondPage.clone().text()).match(/<article class="col-md-6 col-xl-4">/g)?.length, 1);
+    assert.match(await secondPage.text(), /<link rel="canonical" href="https:\/\/grupoavitar\.com\/empleos\?page=2">/);
 
     const searchOne = await worker.fetch(
       new Request("https://grupoavitar.com/empleos?q=Auxiliar%2051"),
@@ -555,10 +745,71 @@ test("limits the listing to 50 recent jobs, filters searches on the server, and 
     assert.match(homepageHtml, /"@type":"SearchAction"/);
     assert.match(homepageHtml, /empleos\?q=\{search_term_string\}/);
     assert.doesNotMatch(homepageHtml, /FEATURED_JOBS|HOME_SEO/);
-    assert.ok(supabaseReads >= 5);
+    assert.equal(supabaseReads, 1);
   } finally {
     globalThis.caches = previousCache;
     globalThis.fetch = previousFetch;
+  }
+});
+
+test("paginación sin filtros usa canonical propio y enlaces reales con 120 vacantes", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  const posts = Array.from({ length: 120 }, (_, index) => {
+    const number = index + 1;
+    const prefix = (0x30000000 + number).toString(16).padStart(8, "0");
+    return publication({
+      id: `${prefix}-1234-1234-1234-123456789abc`,
+      texto_ia: {
+        cargo: `Profesional ${number}`,
+        titulo: `Profesional ${number}`,
+        empresa: "Vaz Perfumes",
+        salario: "No disponible",
+        contacto: {
+          link: "No disponible",
+          correo: "No disponible",
+          telefono: "No disponible",
+        },
+        ubicacion: "Bogotá",
+        requisitos: ["Disponibilidad inmediata"],
+        descripcion: `Profesional ${number} con disponibilidad inmediata.`,
+        tipo_contrato: "No disponible",
+      },
+      imagen_url: "post/paginacion.jpg",
+    });
+  });
+  globalThis.fetch = async () => new Response(JSON.stringify(posts), {
+    headers: { "Content-Type": "application/json" },
+  });
+  const env = {
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY: ANON_KEY,
+    SITE_URL: "https://grupoavitar.com",
+  };
+  try {
+    for (const [page, expectedCards] of [[1, 50], [2, 50], [3, 20]]) {
+      const path = page === 1 ? "/empleos" : `/empleos?page=${page}`;
+      const response = await worker.fetch(new Request(`https://grupoavitar.com${path}`), env);
+      const html = await response.text();
+      assert.equal(response.status, 200, path);
+      assert.equal((html.match(/<article class="col-md-6 col-xl-4">/g) || []).length, expectedCards, path);
+      assert.match(
+        html,
+        new RegExp(`<link rel="canonical" href="https://grupoavitar\\.com/empleos${page === 1 ? "" : `\\?page=${page}`}">`),
+      );
+      for (const target of [1, 2, 3]) {
+        const href = target === 1 ? "/empleos" : `/empleos?page=${target}`;
+        assert.ok(html.includes(`href="${href}"`), `${path} -> ${href}`);
+      }
+      assert.match(html, /aria-label="Paginación"/);
+      assert.doesNotMatch(html, /<meta name="robots" content="noindex,follow">/);
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
   }
 });
 
@@ -571,7 +822,7 @@ test("serves robots.txt without querying Supabase", async () => {
   assert.match(await response.text(), /Sitemap: https:\/\/grupoavitar\.com\/sitemap\.xml/);
 });
 
-test("separates cached anonymous reads from service-role reads", async () => {
+test("la caché pública usa claves anónimas y rechaza claves de servicio", async () => {
   const previousCache = globalThis.caches;
   const previousFetch = globalThis.fetch;
   const cache = new Map();
@@ -590,24 +841,90 @@ test("separates cached anonymous reads from service-role reads", async () => {
   };
 
   try {
-    const anonEnv = {
+    const env = {
       SUPABASE_URL,
-      SUPABASE_ANON_KEY: "header.eyJyb2xlIjoiYW5vbiJ9.signature",
+      SUPABASE_ANON_KEY: ANON_KEY,
       SITE_URL: "https://grupoavitar.com",
     };
-    const serviceEnv = {
-      SUPABASE_URL,
-      SUPABASE_SERVICE_ROLE_KEY: `header.${Buffer.from(JSON.stringify({ role: "service_role" })).toString("base64url")}.signature`,
-      SITE_URL: anonEnv.SITE_URL,
-    };
-    await worker.fetch(new Request("https://grupoavitar.com/empleos"), anonEnv);
-    const servicePage = await worker.fetch(
-      new Request("https://grupoavitar.com/empleos"),
-      serviceEnv,
-    );
-    assert.match(await servicePage.text(), /class="col-md-6 col-xl-4"/);
-    assert.equal(supabaseReads, 2);
+    await worker.fetch(new Request("https://grupoavitar.com/empleos"), env);
+    const secondPage = await worker.fetch(new Request("https://grupoavitar.com/empleos"), env);
+    assert.match(await secondPage.text(), /class="col-md-6 col-xl-4"/);
+    const blocked = await worker.fetch(new Request("https://grupoavitar.com/empleos"), {
+      ...env,
+      SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
+    });
+    assert.equal(blocked.status, 503);
+    assert.equal(supabaseReads, 1);
   } finally {
+    globalThis.caches = previousCache;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("getActiveVacancies consulta una sola vez por minuto sin filtros de Supabase", async () => {
+  const previousCache = globalThis.caches;
+  const previousFetch = globalThis.fetch;
+  const cache = new Map();
+  const requestedUrls = [];
+  globalThis.caches = {
+    default: {
+      match: async (request) => cache.get(request.url)?.clone(),
+      put: async (request, response) => cache.set(request.url, response.clone()),
+    },
+  };
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(new URL(String(url)));
+    return new Response(JSON.stringify([publication()]), {
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  const env = { SUPABASE_URL, SUPABASE_ANON_KEY: ANON_KEY, SITE_URL: "https://grupoavitar.com" };
+  try {
+    const first = await getActiveVacancies(env, new Date("2026-11-15T12:00:10.000Z"));
+    const second = await getActiveVacancies(env, new Date("2026-11-15T12:00:59.000Z"));
+    assert.deepEqual(second, first);
+    assert.equal(requestedUrls.length, 1);
+    assert.equal(requestedUrls[0].searchParams.get("limit"), "1000");
+    assert.equal(requestedUrls[0].searchParams.getAll("or").length, 0);
+    assert.equal(requestedUrls[0].searchParams.getAll("offset").length, 0);
+    assert.ok(cache.size > 0);
+  } finally {
+    globalThis.caches = previousCache;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("getActiveVacancies usa caché anterior hasta 10 minutos y luego falla", async () => {
+  const previousCache = globalThis.caches;
+  const previousFetch = globalThis.fetch;
+  const previousWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(" "));
+  const cache = new Map();
+  globalThis.caches = {
+    default: {
+      match: async (request) => cache.get(request.url)?.clone(),
+      put: async (request, response) => cache.set(request.url, response.clone()),
+    },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify([publication()]), {
+    headers: { "Content-Type": "application/json" },
+  });
+  const env = { SUPABASE_URL, SUPABASE_ANON_KEY: ANON_KEY, SITE_URL: "https://grupoavitar.com" };
+  try {
+    await getActiveVacancies(env, new Date("2026-11-15T12:00:00.000Z"));
+    globalThis.fetch = async () => {
+      throw new Error("Supabase no disponible");
+    };
+    const fallback = await getActiveVacancies(env, new Date("2026-11-15T12:09:00.000Z"));
+    assert.equal(fallback.length, 1);
+    assert.ok(warnings.some((line) => line.includes("caché anterior")));
+    await assert.rejects(
+      getActiveVacancies(env, new Date("2026-11-15T12:11:00.000Z")),
+      /Supabase no disponible/,
+    );
+  } finally {
+    console.warn = previousWarn;
     globalThis.caches = previousCache;
     globalThis.fetch = previousFetch;
   }
@@ -636,7 +953,7 @@ test("renders JSON vacancy data in the home, listing and detail server HTML", as
   try {
     const env = {
       SUPABASE_URL,
-      SUPABASE_SERVICE_ROLE_KEY: `header.${Buffer.from(JSON.stringify({ role: "service_role" })).toString("base64url")}.signature`,
+      SUPABASE_ANON_KEY: ANON_KEY,
       SITE_URL: "https://grupoavitar.com",
       ASSETS: {
         fetch: async () => new Response(
@@ -667,7 +984,7 @@ test("renders JSON vacancy data in the home, listing and detail server HTML", as
     );
     const detailHtml = await detail.text();
     assert.equal(detail.status, 200);
-    assert.match(detailHtml, /<h1 class="jobs-detail-title" itemprop="headline">No disponible<\/h1>/);
+    assert.match(detailHtml, /<h1 class="jobs-detail-title">No disponible<\/h1>/);
     assert.match(detailHtml, /Empresa<\/dt><dd>Vaz Perfumes/);
     assert.match(detailHtml, /Ubicación<\/dt><dd>No disponible/);
     assert.match(detailHtml, /Salario<\/dt><dd>No disponible/);
@@ -709,75 +1026,500 @@ test("renders JSON vacancy data in the home, listing and detail server HTML", as
   }
 });
 
-test("daily cleanup deletes old, imageless and missing-image vacancies", async () => {
+test("JobPosting usa datos verificables y el detalle separa postulación del servicio opcional", async () => {
+  const base = publication();
+  const conRegion = publication({
+    id: "55555555-1234-1234-1234-123456789abc",
+    texto_ia: {
+      ...base.texto_ia,
+      ubicacion: "Riohacha, La Guajira",
+      salario: "$1.200.000 - $1.500.000",
+      tipo_contrato: "Prestación de servicios",
+      contacto: { link: "No disponible", correo: "empleos@example.com", telefono: "No disponible" },
+    },
+  });
+  const salarioAmbiguo = publication({
+    id: "66666666-1234-1234-1234-123456789abc",
+    texto_ia: { ...base.texto_ia, salario: "A convenir", tipo_contrato: "Práctica" },
+  });
+  const inyeccion = publication({
+    id: "77777777-1234-1234-1234-123456789abc",
+    texto_ia: {
+      ...base.texto_ia,
+      descripcion: "Panadero con </script><script>alert(1)</script> y más.",
+    },
+  });
+  const contratos = [
+    { prefix: "aaaa1111", tipo: "Término fijo", expected: "FULL_TIME" },
+    { prefix: "bbbb2222", tipo: "Medio tiempo", expected: "PART_TIME" },
+    { prefix: "cccc3333", tipo: "Contrato temporal", expected: "TEMPORARY" },
+    { prefix: "dddd4444", tipo: "Freelance", expected: "CONTRACTOR" },
+    { prefix: "eeee5555", tipo: "Aprendiz", expected: "INTERN" },
+  ];
+  const contratoFilas = contratos.map(({ prefix, tipo }) => publication({
+    id: `${prefix}-1234-1234-1234-123456789abc`,
+    texto_ia: {
+      ...base.texto_ia,
+      descripcion: `Vacante con contrato ${tipo}.`,
+      tipo_contrato: tipo,
+    },
+  }));
+  const filas = [base, conRegion, salarioAmbiguo, inyeccion, ...contratoFilas];
+
   const previousFetch = globalThis.fetch;
-  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  const serviceKey = `header.${encode({ role: "service_role" })}.signature`;
-  const oldRow = publication({
-    id: "aaaaaaaa-1111-1111-1111-111111111111",
-    fecha_publicacion: "2026-10-30T12:00:00.000Z",
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify(filas), {
+    headers: { "Content-Type": "application/json" },
   });
-  const noImageRow = publication({
-    id: "bbbbbbbb-1111-1111-1111-111111111111",
-    imagen_url: "",
+  const env = {
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY: ANON_KEY,
+    SITE_URL: "https://grupoavitar.com",
+  };
+  const detalle = async (slug) => {
+    const response = await worker.fetch(
+      new Request(`https://grupoavitar.com/empleos/${slug}`),
+      env,
+    );
+    assert.equal(response.status, 200, slug);
+    return response.text();
+  };
+  try {
+    const baseHtml = await detalle("panadero-artesanal-santa-marta-12345678");
+    const baseLd = jsonLdFromHtml(baseHtml, "JobPosting");
+    assert.ok(baseLd);
+    assert.equal(baseLd.jobLocation.address.addressCountry, "CO");
+    assert.equal(baseLd.jobLocation.address.addressLocality, "Santa Marta");
+    assert.equal("addressRegion" in baseLd.jobLocation.address, false);
+    assert.equal(
+      baseLd.validThrough,
+      new Date(Date.parse(baseLd.datePosted) + 15 * 24 * 60 * 60 * 1000).toISOString(),
+    );
+    assert.deepEqual(baseLd.identifier, {
+      "@type": "PropertyValue",
+      name: "Grupo Avitar",
+      value: base.id,
+    });
+    assert.equal(baseLd.directApply, false);
+    assert.equal(baseLd.employmentType, "FULL_TIME");
+    assert.equal(baseLd.baseSalary.currency, "COP");
+    assert.equal(baseLd.baseSalary.value.value, 1500000);
+
+    const regionHtml = await detalle("panadero-artesanal-riohacha-la-guajira-55555555");
+    const regionLd = jsonLdFromHtml(regionHtml, "JobPosting");
+    assert.ok(regionLd);
+    assert.equal(regionLd.jobLocation.address.addressLocality, "Riohacha");
+    assert.equal(regionLd.jobLocation.address.addressRegion, "La Guajira");
+    assert.equal(regionLd.employmentType, "CONTRACTOR");
+    assert.equal(regionLd.baseSalary.value.minValue, 1200000);
+    assert.equal(regionLd.baseSalary.value.maxValue, 1500000);
+    assert.match(regionHtml, /empleos@example\.com/);
+    assert.match(
+      regionHtml,
+      /mailto:contacto@grupoavitar\.com\?subject=Reporte%20de%20vacante%3A%20panadero-artesanal-riohacha-la-guajira-55555555/,
+    );
+
+    const ambiguoHtml = await detalle("panadero-artesanal-santa-marta-66666666");
+    const ambiguoLd = jsonLdFromHtml(ambiguoHtml, "JobPosting");
+    assert.ok(ambiguoLd);
+    assert.equal("baseSalary" in ambiguoLd, false);
+    assert.equal(ambiguoLd.employmentType, "INTERN");
+
+    const inyeccionHtml = await detalle("panadero-artesanal-santa-marta-77777777");
+    const inyeccionLd = jsonLdFromHtml(inyeccionHtml, "JobPosting");
+    assert.ok(inyeccionLd);
+    assert.match(inyeccionLd.description, /&lt;\/script&gt;/);
+    assert.doesNotMatch(inyeccionHtml, /<\/script><script>alert\(1\)/);
+
+    for (const { prefix, expected } of contratos) {
+      const html = await detalle(`panadero-artesanal-santa-marta-${prefix}`);
+      const ld = jsonLdFromHtml(html, "JobPosting");
+      assert.ok(ld);
+      assert.equal(ld.employmentType, expected);
+    }
+
+    const applyIndex = baseHtml.indexOf("Cómo postularte");
+    const optionalIndex = baseHtml.indexOf("Servicio opcional de Grupo Avitar");
+    const infoIndex = baseHtml.indexOf("Información clave");
+    assert.ok(applyIndex > -1 && optionalIndex > applyIndex && infoIndex > optionalIndex);
+    assert.match(baseHtml, /Crear mi hoja de vida/);
+    assert.match(baseHtml, /pushToDataLayer\("vacancy_whatsapp_click"\)/);
+    assert.doesNotMatch(baseHtml, /itemscope itemtype="https:\/\/schema\.org\/Article"/);
+    assert.doesNotMatch(baseHtml, /itemprop="headline"|itemprop="description"/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
+  }
+});
+
+test("ciudades agrupan variantes, publican solo con tres vacantes y enlazan las seis principales", async () => {
+  const citySpecs = [
+    { label: "Bogotá", locations: ["Bogotá, Bogotá D.C.", "Bogotá, Bogotá D.C.", "Bogota, Bogota D.C."] },
+    { label: "Barranquilla", locations: ["Barranquilla, Atlántico", "Barranquilla, Atlántico", "Barranquilla, Atlantico"] },
+    { label: "Bucaramanga", locations: ["Bucaramanga, Santander", "Bucaramanga, Santander", "Bucaramanga, Santander"] },
+    { label: "Cali", locations: ["Cali, Valle del Cauca", "Cali, Valle del Cauca", "Cali, Valle del Cauca"] },
+    { label: "Cartagena", locations: ["Cartagena, Bolívar", "Cartagena, Bolívar", "Cartagena, Bolivar"] },
+    { label: "Medellín", locations: ["Medellín, Antioquia", "Medellín, Antioquia", "Medellin, Antioquia"] },
+    { label: "Pereira", locations: ["Pereira, Risaralda", "Pereira, Risaralda"] },
+  ];
+  const posts = [];
+  let index = 0;
+  for (const spec of citySpecs) {
+    for (const location of spec.locations) {
+      index += 1;
+      const prefix = (0x20000000 + index).toString(16).padStart(8, "0");
+      posts.push(publication({
+        id: `${prefix}-1234-1234-1234-123456789abc`,
+        texto_ia: {
+          cargo: `Auxiliar ${index}`,
+          titulo: `Auxiliar ${index}`,
+          empresa: `Empresa ${index}`,
+          salario: "No disponible",
+          contacto: {
+            link: "No disponible",
+            correo: "No disponible",
+            telefono: "No disponible",
+          },
+          ubicacion: location,
+          requisitos: ["Disponibilidad inmediata"],
+          descripcion: `Auxiliar ${index} en ${location}.`,
+          tipo_contrato: "No disponible",
+        },
+        imagen_url: "post/ciudad.jpg",
+      }));
+    }
+  }
+
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify(posts), {
+    headers: { "Content-Type": "application/json" },
   });
-  const missingImageRow = publication({
-    id: "cccccccc-1111-1111-1111-111111111111",
-    imagen_url: "post/missing.jpg",
-  });
-  const validRow = publication({
-    id: "dddddddd-1111-1111-1111-111111111111",
-    imagen_url: "post/ok.jpg",
-  });
-  const notVacancyRow = publication({
-    id: "eeeeeeee-1111-1111-1111-111111111111",
-    texto_ia: null,
-    texto_ocr: "",
-    metadata: {},
-  });
+  const env = {
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY: ANON_KEY,
+    SITE_URL: "https://grupoavitar.com",
+    ASSETS: {
+      fetch: async () => new Response(
+        "<!doctype html><html><head><!-- HOME_SEO --></head><body><!-- FEATURED_JOBS --></body></html>",
+        { headers: { "Content-Type": "text/html; charset=utf-8" } },
+      ),
+    },
+  };
+  try {
+    const response = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/ciudad/bogota"),
+      env,
+    );
+    const html = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(html, /<h1>Empleos en Bogotá<\/h1>/);
+    assert.match(html, /Hay 3 vacantes activas en Bogotá, publicadas por 3 empresas/);
+    assert.match(html, /<title>Empleos en Bogotá: 3 vacantes activas \| Grupo Avitar<\/title>/);
+    assert.match(
+      html,
+      /<link rel="canonical" href="https:\/\/grupoavitar\.com\/empleos\/ciudad\/bogota">/,
+    );
+    assert.equal((html.match(/<article class="col-md-6 col-xl-4">/g) || []).length, 3);
+    const itemList = jsonLdFromHtml(html, "ItemList");
+    const breadcrumb = jsonLdFromHtml(html, "BreadcrumbList");
+    assert.ok(itemList);
+    assert.ok(breadcrumb);
+    assert.equal(itemList.itemListElement.length, 3);
+    assert.match(itemList.itemListElement[0].url, /\/empleos\/auxiliar-1-/);
+    assert.equal(breadcrumb.itemListElement[2].name, "Bogotá");
+    assert.equal(breadcrumb.itemListElement[2].item, "https://grupoavitar.com/empleos/ciudad/bogota");
+
+    const sinTres = await worker.fetch(
+      new Request("https://grupoavitar.com/empleos/ciudad/pereira"),
+      env,
+    );
+    const sinTresHtml = await sinTres.text();
+    assert.equal(sinTres.status, 404);
+    assert.match(sinTresHtml, /<meta name="robots" content="noindex,follow">/);
+    assert.match(sinTresHtml, /No encontramos vacantes suficientes en esta ciudad/);
+
+    const listing = await worker.fetch(new Request("https://grupoavitar.com/empleos"), env);
+    const listingHtml = await listing.text();
+    const home = await worker.fetch(new Request("https://grupoavitar.com/"), env);
+    const homeHtml = await home.text();
+    const sitemap = await worker.fetch(new Request("https://grupoavitar.com/sitemap.xml"), env);
+    const sitemapXml = await sitemap.text();
+    for (const path of [
+      "/empleos/ciudad/bogota",
+      "/empleos/ciudad/barranquilla",
+      "/empleos/ciudad/bucaramanga",
+      "/empleos/ciudad/cali",
+      "/empleos/ciudad/cartagena",
+      "/empleos/ciudad/medellin",
+    ]) {
+      assert.match(listingHtml, new RegExp(`href="https://grupoavitar\\.com${path}"`));
+      assert.match(homeHtml, new RegExp(`href="https://grupoavitar\\.com${path}"`));
+      assert.ok(sitemapXml.includes(`<loc>https://grupoavitar.com${path}</loc>`), path);
+    }
+    assert.match(
+      sitemapXml,
+      /<loc>https:\/\/grupoavitar\.com\/empleos<\/loc><lastmod>\d{4}-\d{2}-\d{2}<\/lastmod>/,
+    );
+    assert.match(
+      sitemapXml,
+      /<loc>https:\/\/grupoavitar\.com\/empleos\/ciudad\/bogota<\/loc><lastmod>\d{4}-\d{2}-\d{2}<\/lastmod>/,
+    );
+    assert.doesNotMatch(sitemapXml, /<loc>[^<]*\?/);
+    assert.doesNotMatch(listingHtml, /href="https:\/\/grupoavitar\.com\/empleos\/ciudad\/pereira"/);
+    assert.doesNotMatch(sitemapXml, /\/empleos\/ciudad\/pereira/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
+  }
+});
+
+function mockCleanupFetch({ oldRows = [], recentRows = [], imageStatus = () => 200 } = {}) {
   const deletedBatches = [];
-  globalThis.fetch = async (input, options = {}) => {
+  const readOffsets = [];
+  const fetchMock = async (input, options = {}) => {
     const url = new URL(String(input));
     if (url.pathname.startsWith("/storage/")) {
-      return new Response(null, { status: url.pathname.includes("/ok.jpg") ? 200 : 404 });
+      const status = imageStatus(url.pathname);
+      if (status === "timeout") throw new Error("timeout simulado");
+      return new Response(null, { status });
     }
     if (options.method === "DELETE") {
       deletedBatches.push(url.searchParams.get("id"));
       return new Response(null, { status: 204 });
     }
-    const rows = url.searchParams.get("fecha_publicacion")?.startsWith("lte.")
-      ? [oldRow, notVacancyRow]
-      : [noImageRow, missingImageRow, validRow, notVacancyRow];
-    return new Response(JSON.stringify(rows), { headers: { "Content-Type": "application/json" } });
+    const older = url.searchParams.get("fecha_publicacion")?.startsWith("lte.");
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const limit = Number(url.searchParams.get("limit") || 1000);
+    readOffsets.push({ older, offset });
+    const rows = older ? oldRows : recentRows;
+    return new Response(JSON.stringify(rows.slice(offset, offset + limit)), {
+      headers: { "Content-Type": "application/json" },
+    });
   };
+  return { fetchMock, deletedBatches, readOffsets };
+}
 
+function cleanupFixtures() {
+  return {
+    oldRow: publication({
+      id: "aaaaaaaa-1111-1111-1111-111111111111",
+      fecha_publicacion: "2026-10-30T12:00:00.000Z",
+    }),
+    noImageRow: publication({ id: "bbbbbbbb-1111-1111-1111-111111111111", imagen_url: "" }),
+    missingImageRow: publication({ id: "cccccccc-1111-1111-1111-111111111111", imagen_url: "post/missing.jpg" }),
+    validRow: publication({ id: "dddddddd-1111-1111-1111-111111111111", imagen_url: "post/ok.jpg" }),
+    notVacancyRow: publication({
+      id: "eeeeeeee-1111-1111-1111-111111111111",
+      texto_ia: null,
+      texto_ocr: "",
+      metadata: {},
+    }),
+  };
+}
+
+test("limpieza en modo prueba registra TODO sin borrar", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousLog = console.log;
+  const logs = [];
+  console.log = (...args) => logs.push(args.join(" "));
+  const { oldRow, noImageRow, missingImageRow, validRow, notVacancyRow } = cleanupFixtures();
+  const { fetchMock, deletedBatches } = mockCleanupFetch({
+    oldRows: [oldRow, notVacancyRow],
+    recentRows: [noImageRow, missingImageRow, validRow, notVacancyRow],
+    imageStatus: (path) => (path.includes("/ok.jpg") ? 200 : 404),
+  });
+  globalThis.fetch = fetchMock;
   try {
     const result = await runCleanup({
       SUPABASE_URL,
-      SUPABASE_SERVICE_ROLE_KEY: serviceKey,
+      SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
       SITE_URL: "https://grupoavitar.com",
+      CLEANUP_DRY_RUN: "true",
     }, NOW);
     assert.equal(result.skipped, false);
-    assert.deepEqual(result.deleted, [oldRow.id, noImageRow.id, missingImageRow.id]);
-    assert.match(result.reasons[oldRow.id], /antigua/);
-    assert.match(result.reasons[noImageRow.id], /sin imagen/);
-    assert.match(result.reasons[missingImageRow.id], /imagen no encontrada/);
-    assert.equal(deletedBatches.length, 1);
-    assert.match(deletedBatches[0], new RegExp(oldRow.id));
-    assert.doesNotMatch(deletedBatches[0], new RegExp(validRow.id));
+    assert.equal(result.dryRun, true);
+    assert.deepEqual(result.deleted, []);
+    assert.deepEqual(result.wouldDelete, [oldRow.id, noImageRow.id, missingImageRow.id]);
+    assert.equal(deletedBatches.length, 0);
+    for (const id of [oldRow.id, noImageRow.id, missingImageRow.id]) {
+      assert.ok(logs.some((line) => line.includes(id) && line.includes("Eliminaría")), id);
+    }
   } finally {
+    console.log = previousLog;
     globalThis.fetch = previousFetch;
   }
 });
 
-test("daily cleanup skips when there is no service role key", async () => {
-  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+test("limpieza real acepta sb_secret y borra con cabeceras de servicio", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousLog = console.log;
+  console.log = () => {};
+  const { oldRow, noImageRow, missingImageRow, validRow } = cleanupFixtures();
+  const { fetchMock, deletedBatches } = mockCleanupFetch({
+    oldRows: [oldRow],
+    recentRows: [noImageRow, missingImageRow, validRow],
+    imageStatus: (path) => (path.includes("/ok.jpg") ? 200 : 404),
+  });
+  const writeHeaders = [];
+  globalThis.fetch = async (input, options = {}) => {
+    if (options.method === "DELETE") writeHeaders.push(options.headers);
+    return fetchMock(input, options);
+  };
+  try {
+    const result = await runCleanup({
+      SUPABASE_URL,
+      SUPABASE_SECRET_KEY: "sb_secret_example",
+      SITE_URL: "https://grupoavitar.com",
+      CLEANUP_DRY_RUN: "false",
+    }, NOW);
+    assert.equal(result.dryRun, false);
+    assert.deepEqual(result.deleted, [oldRow.id, noImageRow.id, missingImageRow.id]);
+    assert.equal(deletedBatches.length, 1);
+    assert.match(deletedBatches[0], new RegExp(oldRow.id));
+    assert.doesNotMatch(deletedBatches[0], new RegExp(validRow.id));
+    assert.equal(writeHeaders[0].apikey, "sb_secret_example");
+    assert.equal(writeHeaders[0].Authorization, "Bearer sb_secret_example");
+  } finally {
+    console.log = previousLog;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("limpieza aborta si los candidatos superan CLEANUP_MAX_DELETES", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousError = console.error;
+  const previousLog = console.log;
+  console.error = () => {};
+  console.log = () => {};
+  const { oldRow, noImageRow, validRow } = cleanupFixtures();
+  const secondOld = publication({
+    id: "99999999-1111-1111-1111-111111111111",
+    fecha_publicacion: "2026-10-29T12:00:00.000Z",
+  });
+  const { fetchMock, deletedBatches } = mockCleanupFetch({
+    oldRows: [oldRow, secondOld],
+    recentRows: [noImageRow, validRow],
+    imageStatus: () => 200,
+  });
+  globalThis.fetch = fetchMock;
+  try {
+    const result = await runCleanup({
+      SUPABASE_URL,
+      SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
+      SITE_URL: "https://grupoavitar.com",
+      CLEANUP_DRY_RUN: "false",
+      CLEANUP_MAX_DELETES: "2",
+    }, NOW);
+    assert.equal(result.aborted, true);
+    assert.equal(result.deleted.length, 0);
+    assert.equal(result.wouldDelete.length, 3);
+    assert.equal(deletedBatches.length, 0);
+  } finally {
+    console.error = previousError;
+    console.log = previousLog;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("limpieza no borra por host no permitido, timeout ni 5xx", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousWarn = console.warn;
+  const previousLog = console.log;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args.join(" "));
+  console.log = () => {};
+  const { noImageRow, validRow } = cleanupFixtures();
+  const foreignHost = publication({
+    id: "12121212-1111-1111-1111-111111111111",
+    imagen_url: "https://cdn.example.com/foto.jpg",
+  });
+  const timeoutRow = publication({
+    id: "13131313-1111-1111-1111-111111111111",
+    imagen_url: "post/timeout.jpg",
+  });
+  const serverErrorRow = publication({
+    id: "14141414-1111-1111-1111-111111111111",
+    imagen_url: "post/server-error.jpg",
+  });
+  const notFoundRow = publication({
+    id: "15151515-1111-1111-1111-111111111111",
+    imagen_url: "post/not-found.jpg",
+  });
+  const { fetchMock, deletedBatches } = mockCleanupFetch({
+    oldRows: [],
+    recentRows: [noImageRow, foreignHost, timeoutRow, serverErrorRow, notFoundRow, validRow],
+    imageStatus: (path) => {
+      if (path.includes("/timeout.jpg")) return "timeout";
+      if (path.includes("/server-error.jpg")) return 503;
+      if (path.includes("/not-found.jpg")) return 410;
+      return 200;
+    },
+  });
+  globalThis.fetch = fetchMock;
+  try {
+    const result = await runCleanup({
+      SUPABASE_URL,
+      SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
+      SITE_URL: "https://grupoavitar.com",
+      CLEANUP_DRY_RUN: "false",
+    }, NOW);
+    assert.deepEqual(result.deleted, [noImageRow.id, notFoundRow.id]);
+    assert.ok(warnings.some((line) => line.includes(foreignHost.id) && line.includes("host")));
+    assert.equal(deletedBatches.length, 1);
+    assert.doesNotMatch(deletedBatches[0], new RegExp(timeoutRow.id));
+    assert.doesNotMatch(deletedBatches[0], new RegExp(serverErrorRow.id));
+    assert.doesNotMatch(deletedBatches[0], new RegExp(foreignHost.id));
+  } finally {
+    console.warn = previousWarn;
+    console.log = previousLog;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("limpieza pagina las filas antiguas más allá de 1000", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousLog = console.log;
+  console.log = () => {};
+  const oldRows = Array.from({ length: 1001 }, (_, index) => publication({
+    id: `${String(index).padStart(8, "0")}-1111-1111-1111-111111111111`,
+    fecha_publicacion: "2026-10-30T12:00:00.000Z",
+    texto_ia: { cargo: `Puesto ${index}`, titulo: `Puesto ${index}`, empresa: "Empresa", descripcion: "Descripción", ubicacion: "Cali" },
+  }));
+  const { fetchMock, readOffsets } = mockCleanupFetch({ oldRows, recentRows: [] });
+  globalThis.fetch = fetchMock;
+  try {
+    const result = await runCleanup({
+      SUPABASE_URL,
+      SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
+      SITE_URL: "https://grupoavitar.com",
+      CLEANUP_DRY_RUN: "true",
+      CLEANUP_MAX_DELETES: "1000",
+    }, NOW);
+    assert.equal(result.aborted, true);
+    assert.equal(result.wouldDelete.length, 1001);
+    assert.ok(readOffsets.some((read) => read.older && read.offset === 1000));
+  } finally {
+    console.log = previousLog;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("limpieza se omite sin clave de servicio", async () => {
   const result = await runCleanup({
     SUPABASE_URL,
-    SUPABASE_ANON_KEY: `header.${encode({ role: "anon" })}.signature`,
+    SUPABASE_ANON_KEY: ANON_KEY,
     SITE_URL: "https://grupoavitar.com",
   }, NOW);
-  assert.deepEqual(result, { deleted: [], reasons: {}, skipped: true });
+  assert.deepEqual(result, {
+    deleted: [], wouldDelete: [], reasons: {}, skipped: true, dryRun: true, aborted: false,
+  });
 });
 
 test("Google Tag Manager is installed on every static page", () => {
@@ -788,6 +1530,89 @@ test("Google Tag Manager is installed on every static page", () => {
     const html = readFileSync(new URL(name, root), "utf8");
     assert.match(html, /GTM-WML4WJG8/, name);
     assert.match(html, /googletagmanager\.com\/gtm\.js\?id=/, name);
+    assert.match(html, /googletagmanager\.com\/gtag\/js\?id=G-29YCBD5TL9/, name);
     assert.match(html, /googletagmanager\.com\/ns\.html\?id=GTM-WML4WJG8/, name);
+    assert.match(html, /integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW\+ALEwIH"/, name);
+    assert.match(html, /integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"/, name);
+    assert.doesNotMatch(html, /kit\.fontawesome\.com/, name);
+    assert.doesNotMatch(html, /href="#" class="social-icon"/, name);
+    assert.match(html, /<!-- TODO: URL redes -->/, name);
+    assert.doesNotMatch(html, /rel="noopener"(?![a-z])/, name);
+    assert.doesNotMatch(html, /arnaldozxc@gmail\.com/, name);
   }
+});
+
+test("SEO de páginas estáticas: canonical único, URLs limpias e imágenes locales", () => {
+  const root = new URL("../", import.meta.url);
+  const files = readdirSync(root).filter((name) => name.endsWith(".html"));
+  const titles = [];
+  for (const name of files) {
+    const html = readFileSync(new URL(name, root), "utf8");
+    const title = html.match(/<title>([^<]+)<\/title>/)?.[1];
+    assert.ok(title, name);
+    titles.push(title);
+    assert.match(html, /<link rel="canonical" href="https:\/\/grupoavitar\.com\/[^"]*">/, name);
+    assert.doesNotMatch(html, /href="[^"]*\.html/, name);
+    assert.doesNotMatch(html, /<meta name="keywords"/, name);
+    assert.doesNotMatch(html, /images\.unsplash\.com/, name);
+    assert.match(html, /<meta property="og:title"/, name);
+    assert.doesNotMatch(html, /informaci  n|Redacci  n|selecci  n|presentaci  n/, name);
+  }
+  assert.equal(new Set(titles).size, files.length);
+});
+
+test("el layout dinámico carga jobs.css en lugar de estilos en línea", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousCache = globalThis.caches;
+  globalThis.caches = {
+    default: { match: async () => undefined, put: async () => {} },
+  };
+  globalThis.fetch = async () => new Response(JSON.stringify([]), {
+    headers: { "Content-Type": "application/json" },
+  });
+  try {
+    const response = await worker.fetch(new Request("https://grupoavitar.com/empleos"), {
+      SUPABASE_URL,
+      SUPABASE_ANON_KEY: ANON_KEY,
+      SITE_URL: "https://grupoavitar.com",
+    });
+    const html = await response.text();
+    assert.match(html, /\/assets\/css\/jobs\.css\?v=20261121/);
+    assert.doesNotMatch(html, /<style>/);
+    assert.match(html, /href="\/about"/);
+    assert.doesNotMatch(html, /href="\/[^"]*\.html/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    globalThis.caches = previousCache;
+  }
+});
+
+test("configuración del Worker público usa rutas y deshabilita workers_dev", () => {
+  const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+  assert.equal(config.workers_dev, false);
+  assert.ok(config.routes.length > 0);
+  assert.equal("triggers" in config, false);
+  const jobsCss = readFileSync(new URL("../assets/css/jobs.css", import.meta.url), "utf8");
+  assert.match(jobsCss, /\.jobs-hero \{/);
+  assert.match(jobsCss, /\.jobs-card \{/);
+});
+
+test("_headers replica la CSP y cachea los estáticos", () => {
+  const headers = readFileSync(new URL("../_headers", import.meta.url), "utf8");
+  assert.match(headers, /Content-Security-Policy: default-src 'self'/);
+  assert.match(headers, /img-src 'self' data: https:\/\/ebrwwhjmzygiryemnmcd\.supabase\.co/);
+  assert.match(headers, /X-Frame-Options: DENY/);
+  assert.match(headers, /Permissions-Policy: camera=\(\)/);
+  assert.match(headers, /Cross-Origin-Opener-Policy: same-origin/);
+  assert.match(headers, /\/assets\/\*\n  Cache-Control: public, max-age=604800/);
+});
+
+test("las políticas de cookies y privacidad describen GTM y GA4", () => {
+  const cookies = readFileSync(new URL("../cookies.html", import.meta.url), "utf8");
+  const privacy = readFileSync(new URL("../privacidad.html", import.meta.url), "utf8");
+  assert.match(cookies, /Google Tag Manager/);
+  assert.match(cookies, /Google Analytics 4/);
+  assert.match(cookies, /La medición se usa únicamente para mejorar el sitio/);
+  assert.match(privacy, /Google Analytics y Google Tag Manager/);
+  assert.match(privacy, /No compartimos con ellos los datos que nos envías/);
 });

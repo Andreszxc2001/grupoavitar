@@ -1,54 +1,86 @@
-# Nexora - Free Bootstrap 5 & HTML SaaS Business Website Template
+# Grupo Avitar — portal de empleos
 
-#### Preview
+Sitio estático Bootstrap 5.3.3 con dos Cloudflare Workers. El sitio es un portal informativo: las vacantes provienen de canales externos, se procesan con OCR/IA y se muestran como máximo 15 días.
 
- - [Demo](https://themewagon.github.io/nexora/)
+## Arquitectura de dos Workers
 
-#### Download
- - [Download from ThemeWagon](https://themewagon.com/themes/nexora/)
+| Worker | Archivo | Responsabilidad | Secretos |
+| --- | --- | --- | --- |
+| `grupoavitar-empleos` | `worker.mjs` (config `wrangler.jsonc`) | Home, `/empleos`, detalle, ciudades, sitemap y robots | Solo `SUPABASE_ANON_KEY` (JWT `anon` o clave `sb_publishable_...`). **Nunca** claves de servicio. |
+| `grupoavitar-limpieza` | `cleanup/index.mjs` (config `cleanup/wrangler.jsonc`) | Cron diario `0 13 * * *` (08:00 Colombia) que retira vacantes vencidas, sin imagen o con imagen 404/410 | `SUPABASE_SERVICE_ROLE_KEY` (JWT `service_role`) o `SUPABASE_SECRET_KEY` (`sb_secret_...`). Se configura como secreto del Worker de limpieza. |
 
-## Getting Started
+El Worker público responde 503 si detecta `SUPABASE_SERVICE_ROLE_KEY` o `SUPABASE_SECRET_KEY` en su entorno; el mensaje es genérico y el log no incluye claves. La clave anon `sb_publishable_...` envía únicamente el header `apikey`; los JWT `anon` envían `apikey` y `Authorization: Bearer`.
 
-1. Clone Repository
-```
-git clone https://github.com/themewagon/nexora.git
-```
+Para publicar, el dueño configura los secretos con `wrangler secret put` **en el Worker de limpieza** y despliega ambos Workers por separado. No hay secretos en `wrangler.jsonc`, `_headers` ni archivos versionados.
 
-## Author 
-```
-Design and code is completely written by Harshad Mahadik and development team. 
-```
+## Consultas y caché
 
-## License
+El Worker público hace una sola consulta a `canales_publicaciones` por minuto, con `limit=1000` y el corte de 15 días calculado sobre el minuto exacto. La respuesta se guarda en `caches.default` y la reutilizan home, listado, detalle y sitemap. Los filtros de búsqueda, ciudad y fecha se aplican en el Worker sobre esa respuesta; no se envían condiciones `or` a Supabase.
 
- - Design and Code is Copyright &copy; <a href="https://github.com/HarshadMahadik" target="_blank">Harshad Mahadik</a>
- - Licensed cover under [MIT]
- - Distributed by <a href="https://themewagon.com" target="_blank">ThemeWagon</a>
+Si Supabase falla, el Worker usa la caché de los 10 minutos anteriores y registra una advertencia genérica. Agotado ese margen, responde 503 con un mensaje que no revela detalles internos.
 
-## Ofertas de empleo en Cloudflare Workers
+## Limpieza segura
 
-El sitio conserva sus páginas HTML estáticas. `worker.mjs` renderiza en el servidor las rutas `/empleos`, `/empleos/:slug`, `/sitemap.xml` y `/robots.txt`, consultando `public.canales_publicaciones`.
+- `CLEANUP_DRY_RUN` está en `"true"` por defecto: el cron solo registra ID y motivo de lo que borraría. Para ejecutar borrados reales, el dueño debe cambiar esa variable de forma explícita y deliberada.
+- `CLEANUP_MAX_DELETES=200` limita cada ejecución. Si hay más candidatos, se aborta sin borrar y se registra el error.
+- "Sin imagen" significa únicamente `imagen_url` vacía o nula. Una URL de otro host se registra como advertencia y no se borra. Solo 404/410 de la imagen autorizan el borrado; timeouts y 5xx nunca.
+- Las filas antiguas se paginan hasta agotarlas, con un tope de 50 páginas por ejecución como medida anti abuso.
+- Cada borrado (o simulación) se registra con ID y motivo; se pueden consultar con `wrangler tail`.
 
-La clave privada `SUPABASE_SERVICE_ROLE_KEY` se usa únicamente en el Worker (nunca se envía al navegador). Esta opción omite RLS; limita el Worker a sus lecturas actuales y rota cualquier clave de servicio que se haya compartido:
+## Cabeceras y CSP
 
-```powershell
-npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-npx wrangler deploy
-```
+Todas las respuestas HTML y de texto del Worker y los estáticos incluyen CSP, `X-Frame-Options: DENY`, `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`, `X-Content-Type-Options: nosniff` y `Referrer-Policy: strict-origin-when-cross-origin`. HSTS se configura en Cloudflare, no en código.
 
-Para desarrollo local:
+La CSP se deriva de `env.SUPABASE_URL` para `img-src`. En el Worker público, la constante `CSP_MODE` de `worker.mjs` está en `enforce`; si una integración legítima falla, cámbiala temporalmente a `report-only` (el header pasa a `Content-Security-Policy-Report-Only`), revisa los reportes y vuelve a `enforce`. El archivo `_headers` replica la CSP para activos estáticos con el host de Supabase de producción; actualízalo si cambia el proyecto de Supabase. `_headers` no está excluido en `.assetsignore`.
+
+## Analítica y privacidad
+
+El contenedor `GTM-WML4WJG8` y la etiqueta directa `G-29YCBD5TL9` siguen cargando en las 17 páginas y en el HTML generado por el Worker. La CSP permite `googletagmanager.com` y `google-analytics.com` sin habilitar eval ni `unsafe-eval`. El detalle de vacante envía `view_vacancy` y `vacancy_whatsapp_click` a `gtag` y a `dataLayer`; no envía documentos, correos ni datos de formularios.
+
+Las políticas `cookies.html` y `privacidad.html` describen la medición con Google Analytics 4 y Google Tag Manager. Antes de publicar, confirma en la interfaz de GTM si el contenedor ya incluye la etiqueta GA4 `G-29YCBD5TL9`: de ser así, decide con el dueño si se conserva solo GTM o solo la etiqueta directa para evitar doble conteo.
+
+## Dependencias e iconos
+
+Bootstrap CSS 5.3.3, Bootstrap JS 5.3.3 y Bootstrap Icons 1.11.3 se cargan desde jsDelivr con versión fija, `integrity` SHA-384 calculado sobre los archivos reales y `crossorigin="anonymous"`. Los hashes se generaron con `curl` y `sha384` sobre los archivos descargados. Bootstrap Icons es la única librería de iconos; se eliminó el kit de FontAwesome.
+
+Equivalencias usadas:
+
+| FontAwesome | Bootstrap Icons |
+| --- | --- |
+| `fa-x-twitter` | `bi-twitter-x` |
+| `fa-linkedin-in` | `bi-linkedin` |
+| `fa-facebook-f` | `bi-facebook` |
+| `fa-instagram` | `bi-instagram` |
+| `fa-whatsapp` | `bi-whatsapp` |
+| `fa-arrow-right` / `fa-arrow-left` | `bi-arrow-right` / `bi-arrow-left` |
+| `fa-briefcase` | `bi-briefcase` |
+| `fa-magnifying-glass` | `bi-search` |
+| `fa-bolt` | `bi-lightning-charge` |
+| `fa-arrow-up-right-from-square` | `bi-box-arrow-up-right` |
+| `fa-building` | `bi-building` |
+| `fa-location-dot` | `bi-geo-alt` |
+| `fa-money-bill-wave` | `bi-cash-coin` |
+| `fa-file-contract` | `bi-file-earmark-text` |
+| `fa-address-book` | `bi-person-vcard` |
+| `fa-calendar-days` | `bi-calendar3` |
+| `fa-bullhorn` | `bi-megaphone` |
+
+CSS y JS locales se sirven con query string de versión (`?v=20261121`) para permitir `Cache-Control` largo en `/assets/*`. Los estilos del portal de empleos viven en `assets/css/jobs.css`; el Worker los enlaza en lugar de incrustar un bloque `<style>`.
+
+## SEO de las páginas estáticas
+
+Las 17 páginas tienen título único, descripción, Open Graph y canonical absoluto sin extensión (`https://grupoavitar.com/about`, no `/about.html`). Los enlaces internos de las páginas y del layout del Worker usan rutas limpias, y el JS marca el enlace activo comparando la ruta sin extensión. Las dos imágenes de Unsplash se reemplazaron por `/assets/img/profile-img.jpg`, con `width`, `height`, `loading="lazy"` y `decoding="async"`.
+
+`wrangler.jsonc` mantiene `workers_dev: false` para publicar solo por las rutas configuradas en `grupoavitar.com`.
+
+## Desarrollo y pruebas
 
 ```powershell
 pnpm install
 pnpm start
+node --test tests/worker.test.mjs
+npx wrangler deploy --dry-run
+npx wrangler deploy --dry-run --config cleanup/wrangler.jsonc
 ```
 
-Abre `http://127.0.0.1:8787/empleos`. El archivo local `.dev.vars` (excluido de Git) contiene `SUPABASE_URL`, `SITE_URL` y el campo `SUPABASE_SERVICE_ROLE_KEY`. Pega allí una clave nueva ya rotada; no la compartas por el chat ni la guardes en `wrangler.jsonc`.
-
-Google Tag Manager (`GTM-WML4WJG8`) está instalado en todas las páginas estáticas y en las páginas generadas por el Worker (script en `<head>` y `<noscript>` tras `<body>`). En el detalle de cada vacante se envían a `dataLayer` los eventos `view_vacancy` y `vacancy_whatsapp_click` (botón "Crear mi hoja de vida"), junto con GA4. Si el contenedor GTM ya incluye GA4, quita el snippet directo de `gtag.js` para no contar páginas dos veces.
-
-La portada muestra hasta 12 vacantes recientes y `/empleos` hasta 50 por página. El listado permite filtrar por cargo o palabra clave, ciudad y rango de fechas de publicación. El botón de WhatsApp, con un mensaje precargado para solicitar ayuda con la hoja de vida, aparece solo en el detalle individual de cada vacante.
-
-Las vacantes se muestran máximo 15 días y solo si tienen imagen; si la imagen pública falla al cargar, `main.js` oculta la tarjeta o el detalle de inmediato. Un cron diario (08:00 hora de Colombia, `0 13 * * *` UTC) cruza la tabla con el almacenamiento de imágenes: elimina las vacantes antiguas, las que no tienen `imagen_url` y las cuya imagen devuelve 404/410. Cada eliminación se registra en los logs con su ID y motivo (`npx wrangler tail`). El cron solo actúa si `SUPABASE_SERVICE_ROLE_KEY` es una clave de servicio válida; sin ella omite la limpieza. Errores temporales de red o respuestas 5xx no eliminan vacantes.
-
-`SUPABASE_URL` y `SITE_URL` de producción están en `wrangler.jsonc`. Las rutas de Cloudflare apuntan al dominio canónico `grupoavitar.com`; el despliegue requiere acceso a la zona correspondiente. Si se usa solo la clave pública anon, Supabase debe permitir la lectura mediante RLS.
+Abre `http://127.0.0.1:8787/empleos`. El archivo local `.dev.vars` (excluido de Git) contiene `SUPABASE_URL`, `SITE_URL` y `SUPABASE_ANON_KEY` para el Worker público. No pegues claves de servicio allí: la guardia de seguridad bloquearía el Worker.

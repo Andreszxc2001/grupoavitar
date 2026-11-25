@@ -1,12 +1,19 @@
 const PAGE_SIZE = 50;
-const QUERY_BATCH_SIZE = 100;
-const MAX_QUERY_ROWS = 1000;
+const QUERY_ROW_LIMIT = 1000;
+const VACANCY_CACHE_MINUTES = 1;
+const VACANCY_STALE_MINUTES = 10;
 const FEATURED_LIMIT = 12;
 const PUBLICATION_DAYS = 15;
 const CLEANUP_IMAGE_TIMEOUT_MS = 5000;
 const CLEANUP_IMAGE_CONCURRENCY = 10;
 const CLEANUP_DELETE_BATCH = 100;
+const CLEANUP_MAX_PAGES = 50;
+const CLEANUP_DEFAULT_MAX_DELETES = 200;
+const CSP_MODE = "enforce";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const BOOTSTRAP_CSS_INTEGRITY = "sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH";
+const BOOTSTRAP_JS_INTEGRITY = "sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz";
+const BOOTSTRAP_ICONS_CSS_INTEGRITY = "sha384-XGjxtQfXaH2tnPFa9x+ruJTuLE3Aa6LhHSWRr1XeTyhezb4abCG4ccI5AkVDxqC+";
 const NOT_AVAILABLE = "No disponible";
 const VACANCY_JSON_KEYS = [
   "cargo",
@@ -17,17 +24,13 @@ const VACANCY_JSON_KEYS = [
   "descripcion",
   "tipo_contrato",
 ];
-const EMPLOYMENT_TYPE_MAP = {
-  "tiempo completo": "FULL_TIME",
-  indefinido: "FULL_TIME",
-  "contrato indefinido": "FULL_TIME",
-  "contrato temporal": "TEMPORARY",
-  temporal: "TEMPORARY",
-  "medio tiempo": "PART_TIME",
-  "part time": "PART_TIME",
-  pasantia: "INTERN",
-  practicas: "INTERN",
-};
+const EMPLOYMENT_TYPE_PATTERNS = [
+  { pattern: /tiempo completo|indefinido|termino fijo/, type: "FULL_TIME" },
+  { pattern: /medio tiempo|part time/, type: "PART_TIME" },
+  { pattern: /temporal|obra o labor/, type: "TEMPORARY" },
+  { pattern: /prestacion de servicios|contratista|freelance/, type: "CONTRACTOR" },
+  { pattern: /practica|pasantia|aprendiz/, type: "INTERN" },
+];
 const WHATSAPP_PHONE = "573019441676";
 const FEATURED_JOBS_MARKER = "<!-- FEATURED_JOBS -->";
 const HOME_SEO_MARKER = "<!-- HOME_SEO -->";
@@ -149,6 +152,36 @@ function normalize(value) {
     .toLowerCase();
 }
 
+function employmentTypeFrom(value) {
+  const normalized = normalize(value);
+  if (!normalized) return "";
+  return EMPLOYMENT_TYPE_PATTERNS.find(({ pattern }) => pattern.test(normalized))?.type || "";
+}
+
+function parseCopNumber(token) {
+  const groups = token.split(/[.,]/);
+  if (groups.length > 3) return null;
+  if (groups.slice(1).some((group) => group.length !== 3)) return null;
+  const digits = groups.join("");
+  if (!/^\d+$/.test(digits)) return null;
+  const amount = Number(digits);
+  return Number.isSafeInteger(amount) && amount > 0 ? amount : null;
+}
+
+function parseCopSalary(value) {
+  const raw = text(value);
+  if (!raw) return null;
+  const normalized = normalize(raw);
+  if (!raw.includes("$") && !/cop|pesos?|colombianos?/.test(normalized)) return null;
+  if (/convenir|millon|no disponible/.test(normalized)) return null;
+  const tokens = raw.match(/\d[\d.,]*\d|\d/g) || [];
+  if (tokens.length < 1 || tokens.length > 2) return null;
+  const amounts = tokens.map(parseCopNumber);
+  if (amounts.some((amount) => amount === null)) return null;
+  amounts.sort((left, right) => left - right);
+  return { min: amounts[0], max: amounts[amounts.length - 1] };
+}
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => {
     const entities = {
@@ -183,30 +216,59 @@ function slugify(value) {
     .replace(/-+$/g, "");
 }
 
+const IMAGE_BUCKET_PREFIX = "/storage/v1/object/public/imagenes_posts/";
+
+function safeObjectPath(pathname) {
+  const segments = pathname.split("/").filter(Boolean);
+  if (!segments.length) return false;
+  return segments.every((segment) => {
+    let decoded = segment;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return false;
+    }
+    return decoded !== "." && decoded !== ".." && !decoded.includes("\\") && !decoded.includes("/");
+  });
+}
+
 function resolveImageUrl(imageUrl, supabaseUrl) {
   const value = text(imageUrl);
-  if (!value) return "";
+  if (!value || value.length > 2000) return "";
   if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^https:\/\//i.test(value)) {
     return "";
   }
   try {
     const base = new URL(supabaseUrl);
-    if (/^https?:\/\//i.test(value)) {
+    if (base.protocol !== "https:") return "";
+    if (/^https:\/\//i.test(value)) {
       const parsed = new URL(value);
-      return parsed.protocol === "https:" ? parsed.href : "";
+      if (
+        parsed.protocol !== "https:" ||
+        parsed.host !== base.host ||
+        parsed.username ||
+        parsed.password ||
+        !parsed.pathname.startsWith(IMAGE_BUCKET_PREFIX) ||
+        !safeObjectPath(parsed.pathname.slice(IMAGE_BUCKET_PREFIX.length))
+      ) {
+        return "";
+      }
+      return parsed.href;
     }
-    if (value.startsWith("/")) {
-      const parsed = new URL(value, base);
-      return parsed.protocol === "https:" ? parsed.href : "";
+    const pathname = value.startsWith("/")
+      ? value
+      : `${IMAGE_BUCKET_PREFIX}${value.replace(/^imagenes_posts\//, "")}`;
+    if (
+      !pathname.startsWith(IMAGE_BUCKET_PREFIX) ||
+      !safeObjectPath(pathname.slice(IMAGE_BUCKET_PREFIX.length))
+    ) {
+      return "";
     }
-    const objectPath = value.replace(/^imagenes_posts\//, "");
-    return new URL(
-      `/storage/v1/object/public/imagenes_posts/${objectPath
-        .split("/")
-        .map(encodeURIComponent)
-        .join("/")}`,
-      base,
-    ).href;
+    const objectPath = pathname.slice(IMAGE_BUCKET_PREFIX.length)
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    return new URL(`${IMAGE_BUCKET_PREFIX}${objectPath}`, base).href;
   } catch {
     return "";
   }
@@ -258,13 +320,15 @@ function publicationToVacancy(publication, supabaseUrl) {
     ? isUnavailable(company)
       ? "oferta-laboral"
       : company
-    : `${title} ${location}`;
+    : isUnavailable(location)
+      ? title
+      : `${title} ${location}`;
   const contact = isPlainObject(structured.contacto) ? structured.contacto : {};
   const description = displayValue(structured.descripcion);
 
   return {
     id,
-    slug: `${slugify(slugBase) || "oferta-laboral"}-${id.slice(0, 8)}`,
+    slug: `${slugify(slugBase) || "oferta-laboral"}-${id.slice(0, 8).toLowerCase()}`,
     title,
     company,
     location,
@@ -292,17 +356,13 @@ function activeVacancies(publications, supabaseUrl, now = new Date()) {
   const expiryBoundary = now.getTime() - PUBLICATION_DAYS * 24 * 60 * 60 * 1000;
   const seen = new Set();
   const vacancies = [];
-  const recentFirst = [...publications].sort(
-    (left, right) =>
-      Date.parse(right.fecha_publicacion) - Date.parse(left.fecha_publicacion),
-  );
-  for (const publication of recentFirst) {
+  // Supabase ya entrega las filas ordenadas por fecha desc: no hace falta reordenar.
+  for (const publication of publications) {
     const publishedAt = new Date(publication.fecha_publicacion).getTime();
     if (
       !Number.isFinite(publishedAt) ||
       publishedAt > now.getTime() ||
-      publishedAt <= expiryBoundary ||
-      !isVacancy(publication)
+      publishedAt <= expiryBoundary
     ) {
       continue;
     }
@@ -314,91 +374,29 @@ function activeVacancies(publications, supabaseUrl, now = new Date()) {
   return vacancies;
 }
 
-function queryWords(value) {
-  return normalize(value)
-    .split(/\s+/)
-    .map((word) => word.replace(/[^\p{L}\p{N}]/gu, ""))
-    .filter(Boolean)
-    .map((word) => word.slice(0, 4));
-}
-
-function dateFilterIso(value, endOfDay = false) {
-  return `${value}T${endOfDay ? "04:59:59.999" : "05:00:00.000"}Z`;
-}
-
-function publicationQueryUrl(env, now, options = {}) {
-  const {
-    searchTerm = "",
-    cityTerm = "",
-    startDate = "",
-    endDate = "",
-    limit = QUERY_BATCH_SIZE,
-    offset = 0,
-  } = options;
+function publicationQueryUrl(env, now) {
   const cutoff = new Date(
     now.getTime() - PUBLICATION_DAYS * 24 * 60 * 60 * 1000,
   ).toISOString();
   const url = new URL("/rest/v1/canales_publicaciones", env.SUPABASE_URL);
   url.searchParams.set("select", PUBLICATION_FIELDS);
   url.searchParams.set("fecha_publicacion", `gte.${cutoff}`);
+  url.searchParams.set("imagen_url", "not.is.null");
   url.searchParams.set("order", "fecha_publicacion.desc");
-  url.searchParams.set("limit", String(limit));
-  if (offset > 0) url.searchParams.set("offset", String(offset));
-  if (startDate) {
-    url.searchParams.append("fecha_publicacion", `gte.${dateFilterIso(startDate)}`);
-  }
-  if (endDate) {
-    url.searchParams.append("fecha_publicacion", `lte.${dateFilterIso(endDate, true)}`);
-  }
-  const contentFields = [
-    "texto_ocr",
-    "canal_nombre",
-    "texto_ia->>titulo",
-    "texto_ia->>cargo",
-    "texto_ia->>empresa",
-    "texto_ia->>salario",
-    "texto_ia->>ubicacion",
-    "texto_ia->>descripcion",
-    "texto_ia->>tipo_contrato",
-    "texto_ia->>requisitos",
-    "texto_ia->contacto->>link",
-    "texto_ia->contacto->>correo",
-    "texto_ia->contacto->>telefono",
-  ];
-  for (const word of queryWords(searchTerm)) {
-    const pattern = `*${word}*`;
-    url.searchParams.append(
-      "or",
-      `(${contentFields.map((field) => `${field}.ilike.${pattern}`).join(",")})`,
-    );
-  }
-  const cityFields = [
-    "metadata->>ciudad",
-    "metadata->>city",
-    "metadata->>ubicacion",
-    "metadata->>location",
-    "texto_ia->>ubicacion",
-    "texto_ocr",
-  ];
-  for (const word of queryWords(cityTerm)) {
-    const pattern = `*${word}*`;
-    url.searchParams.append(
-      "or",
-      `(${cityFields.map((field) => `${field}.ilike.${pattern}`).join(",")})`,
-    );
-  }
+  url.searchParams.set("limit", String(QUERY_ROW_LIMIT));
   return url;
 }
 
-async function fetchPublicationRows(env, now, options, url = publicationQueryUrl(env, now, options)) {
+function supabaseReadHeaders(apiKey) {
+  const headers = { apikey: apiKey };
+  if (!apiKey.startsWith("sb_publishable_")) headers.Authorization = `Bearer ${apiKey}`;
+  return headers;
+}
+
+async function fetchPublicationRows(env, now, url = publicationQueryUrl(env, now)) {
   const apiKey = supabaseReadKey(env);
   if (!apiKey) throw new Error("No hay una clave válida de solo lectura configurada.");
-  const response = await fetch(url, {
-    headers: {
-      apikey: apiKey,
-      Authorization: `Bearer ${apiKey}`,
-    },
-  });
+  const response = await fetch(url, { headers: supabaseReadHeaders(apiKey) });
   if (response.status === 416) return [];
   if (!response.ok) {
     console.error("Supabase publication read failed", response.status);
@@ -409,70 +407,119 @@ async function fetchPublicationRows(env, now, options, url = publicationQueryUrl
   return rows;
 }
 
-async function getPublicationRows(env, now, options = {}) {
-  const url = publicationQueryUrl(env, now, options);
-  const minute = Math.floor(now.getTime() / 60000);
-  const accessMode = env.SUPABASE_SERVICE_ROLE_KEY ? "service-role" : "anon";
-  const cacheKey = new Request(
-    `${env.SITE_URL}/__cache/publicaciones-laborales/${accessMode}/${minute}${url.pathname}${url.search}`,
-  );
-  const cache = caches.default;
-  const cached = await cache.match(cacheKey);
-  if (cached) return cached.json();
+const PROCESSED_FRESH_SECONDS = 300;   // se refresca cada 5 min
+const PROCESSED_KEEP_SECONDS = 3600;   // se conserva 1 h como respaldo si Supabase falla
 
-  const rows = await fetchPublicationRows(env, now, options, url);
+function processedCacheKey(env) {
+  const siteUrl = env.SITE_URL.replace(/\/+$/, "");
+  return new Request(`${siteUrl}/__cache/vacantes-procesadas-v1`);
+}
+
+async function buildProcessedVacancies(env, now) {
+  const rows = await fetchPublicationRows(env, now);
+  const vacancies = activeVacancies(rows, env.SUPABASE_URL, now);
+  for (const vacancy of vacancies) delete vacancy.duplicateKey;
+  const cache = caches.default;
   await cache.put(
-    cacheKey,
-    new Response(JSON.stringify(rows), {
+    processedCacheKey(env),
+    new Response(JSON.stringify(vacancies), {
       headers: {
         "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "public, max-age=60",
+        "Cache-Control": `public, max-age=${PROCESSED_KEEP_SECONDS}`,
+        "X-Stored-At": String(Date.now()),
       },
     }),
   );
-  return rows;
+  return vacancies;
 }
 
-async function getVacancies(env, now, options = {}, maxVacancies = PAGE_SIZE) {
-  const rows = [];
-  let vacancies = [];
-  let offset = 0;
-  while (offset < MAX_QUERY_ROWS && vacancies.length < maxVacancies) {
-    const limit = Math.min(QUERY_BATCH_SIZE, MAX_QUERY_ROWS - offset);
-    const page = await getPublicationRows(env, now, { ...options, limit, offset });
-    rows.push(...page);
-    vacancies = activeVacancies(rows, env.SUPABASE_URL, now);
-    if (page.length < limit) break;
-    offset += limit;
+async function getVacancies(env, ctx, now) {
+  const cache = caches.default;
+  const cached = await cache.match(processedCacheKey(env));
+  if (cached) {
+    const age = now.getTime() - (Number(cached.headers.get("X-Stored-At")) || 0);
+    if (age > PROCESSED_FRESH_SECONDS * 1000) {
+      ctx.waitUntil(buildProcessedVacancies(env, now).catch((e) => console.warn("refresh falló", e)));
+    }
+    return cached.json();
   }
-  return vacancies.slice(0, maxVacancies);
+  return buildProcessedVacancies(env, now);
 }
 
-function cleanupQueryUrl(env, cutoff, olderThan) {
+function vacancyCacheKey(env, minute) {
+  const siteUrl = env.SITE_URL.replace(/\/+$/, "");
+  return new Request(`${siteUrl}/__cache/vacantes-activas/${minute}`);
+}
+
+async function getActiveVacancies(env, now) {
+  const currentMinute = Math.floor(now.getTime() / 60000);
+  const cache = caches.default;
+  const fresh = await cache.match(vacancyCacheKey(env, currentMinute));
+  if (fresh) return fresh.json();
+
+  const cacheTime = new Date(currentMinute * 60000);
+  try {
+    const rows = await fetchPublicationRows(env, cacheTime);
+    await cache.put(
+      vacancyCacheKey(env, currentMinute),
+      new Response(JSON.stringify(rows), {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": `public, max-age=${VACANCY_STALE_MINUTES * 60}`,
+          "X-Grupo-Avitar-Cache-Minute": String(currentMinute),
+        },
+      }),
+    );
+    return rows;
+  } catch (error) {
+    for (
+      let minute = currentMinute - 1;
+      minute >= currentMinute - VACANCY_STALE_MINUTES;
+      minute -= 1
+    ) {
+      const stale = await cache.match(vacancyCacheKey(env, minute));
+      if (stale) {
+        console.warn("[empleos] Usando caché anterior por fallo de Supabase.");
+        return stale.json();
+      }
+    }
+    throw error;
+  }
+}
+
+function cleanupQueryUrl(env, cutoff, olderThan, offset) {
   const url = new URL("/rest/v1/canales_publicaciones", env.SUPABASE_URL);
   url.searchParams.set("select", PUBLICATION_FIELDS);
   url.searchParams.set("fecha_publicacion", olderThan ? `lte.${cutoff}` : `gt.${cutoff}`);
   url.searchParams.set("order", "fecha_publicacion.desc");
-  url.searchParams.set("limit", String(MAX_QUERY_ROWS));
+  url.searchParams.set("limit", String(QUERY_ROW_LIMIT));
+  if (offset > 0) url.searchParams.set("offset", String(offset));
   return url;
 }
 
 async function fetchCleanupRows(env, cutoff, olderThan) {
-  const apiKey = supabaseReadKey(env);
-  if (!apiKey) throw new Error("No hay una clave válida de solo lectura configurada.");
-  const response = await fetch(cleanupQueryUrl(env, cutoff, olderThan), {
-    headers: {
-      apikey: apiKey,
-      Authorization: `Bearer ${apiKey}`,
-    },
-  });
-  if (!response.ok) {
-    console.error("Supabase cleanup read failed", response.status);
-    throw new Error("No fue posible consultar las publicaciones para la limpieza.");
+  const apiKey = supabaseCleanupKey(env);
+  if (!apiKey) throw new Error("No hay una clave válida de limpieza configurada.");
+  const rows = [];
+  for (let page = 0; page < CLEANUP_MAX_PAGES; page += 1) {
+    const offset = page * QUERY_ROW_LIMIT;
+    const response = await fetch(cleanupQueryUrl(env, cutoff, olderThan, offset), {
+      headers: {
+        apikey: apiKey,
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+    if (!response.ok) {
+      console.error("Supabase cleanup read failed", response.status);
+      throw new Error("No fue posible consultar las publicaciones para la limpieza.");
+    }
+    const batch = await response.json();
+    if (!Array.isArray(batch)) throw new Error("Respuesta inválida de Supabase.");
+    rows.push(...batch);
+    if (batch.length < QUERY_ROW_LIMIT) return rows;
   }
-  const rows = await response.json();
-  if (!Array.isArray(rows)) throw new Error("Respuesta inválida de Supabase.");
-  return rows;
+  console.error(`[limpieza] Se alcanzó el tope de ${CLEANUP_MAX_PAGES} páginas; no se eliminará nada.`);
+  throw new Error("Se alcanzó el tope de páginas de limpieza.");
 }
 
 async function imageExists(url) {
@@ -497,9 +544,9 @@ async function imageExists(url) {
 }
 
 async function deletePublicationIds(env, ids) {
-  const key = env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!isServiceRoleKey(key)) {
-    throw new Error("Se requiere SUPABASE_SERVICE_ROLE_KEY para eliminar publicaciones.");
+  const key = supabaseCleanupKey(env);
+  if (!key) {
+    throw new Error("Se requiere una clave de servicio válida para eliminar publicaciones.");
   }
   const url = new URL("/rest/v1/canales_publicaciones", env.SUPABASE_URL);
   url.searchParams.set("id", `in.(${ids.join(",")})`);
@@ -518,12 +565,19 @@ async function deletePublicationIds(env, ids) {
 }
 
 async function runCleanup(env, now = new Date()) {
-  if (!validEnvironment(env)) throw new Error("Configuración del Worker incompleta.");
-  if (!isServiceRoleKey(env.SUPABASE_SERVICE_ROLE_KEY)) {
-    console.warn("Limpieza omitida: SUPABASE_SERVICE_ROLE_KEY no válida.");
-    return { deleted: [], reasons: {}, skipped: true };
+  if (!supabaseCleanupKey(env)) {
+    console.warn("Limpieza omitida: no hay una clave de servicio válida.");
+    return { deleted: [], wouldDelete: [], reasons: {}, skipped: true, dryRun: true, aborted: false };
   }
+  if (!validCleanupEnvironment(env)) throw new Error("Configuración del Worker de limpieza incompleta.");
 
+  const rawMaxDeletes = text(env.CLEANUP_MAX_DELETES) || String(CLEANUP_DEFAULT_MAX_DELETES);
+  const maxDeletes = Number(rawMaxDeletes);
+  if (!Number.isSafeInteger(maxDeletes) || maxDeletes < 1 || maxDeletes > 1000) {
+    console.error(`[limpieza] CLEANUP_MAX_DELETES no válido: ${rawMaxDeletes.slice(0, 20)}`);
+    throw new Error("CLEANUP_MAX_DELETES no válido.");
+  }
+  const dryRun = (text(env.CLEANUP_DRY_RUN) || "true") !== "false";
   const cutoff = new Date(now.getTime() - PUBLICATION_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const [oldRows, recentRows] = await Promise.all([
     fetchCleanupRows(env, cutoff, true),
@@ -537,7 +591,7 @@ async function runCleanup(env, now = new Date()) {
   };
 
   for (const row of oldRows) {
-    if (isVacancy(row)) addForDeletion(row, `antigua (${text(row.fecha_publicacion)})`);
+    if (isVacancy(row)) addForDeletion(row, `antigua (${text(row.fecha_publicacion).slice(0, 40)})`);
   }
 
   const imageCandidates = [];
@@ -545,12 +599,16 @@ async function runCleanup(env, now = new Date()) {
     if (!isVacancy(row)) continue;
     const id = text(row.id);
     if (!UUID_PATTERN.test(id) || reasons.has(id)) continue;
-    const vacancy = publicationToVacancy(row, env.SUPABASE_URL);
-    if (!vacancy?.imageUrl) {
+    if (!text(row.imagen_url)) {
       addForDeletion(row, "sin imagen");
       continue;
     }
-    imageCandidates.push({ id, imageUrl: vacancy.imageUrl });
+    const imageUrl = resolveImageUrl(row.imagen_url, env.SUPABASE_URL);
+    if (!imageUrl) {
+      console.warn(`[limpieza] Imagen con host o ruta no permitida en ${id}; no se eliminará.`);
+      continue;
+    }
+    imageCandidates.push({ id, imageUrl });
   }
 
   for (let index = 0; index < imageCandidates.length; index += CLEANUP_IMAGE_CONCURRENCY) {
@@ -565,31 +623,138 @@ async function runCleanup(env, now = new Date()) {
 
   const ids = [...reasons.keys()];
   for (const id of ids) {
-    console.log(`[limpieza] Eliminar vacante ${id}: ${reasons.get(id)}`);
+    console.log(`[limpieza] ${dryRun ? "Eliminaría" : "Eliminar"} vacante ${id}: ${reasons.get(id)}`);
+  }
+  if (ids.length > maxDeletes) {
+    console.error(`[limpieza] ${ids.length} candidatos superan el tope de ${maxDeletes}; no se eliminará nada.`);
+    return {
+      deleted: [],
+      wouldDelete: ids,
+      reasons: Object.fromEntries(reasons),
+      skipped: false,
+      dryRun,
+      aborted: true,
+    };
+  }
+  if (dryRun) {
+    console.log(`[limpieza] Modo prueba: ${ids.length} vacantes no eliminadas.`);
+    return {
+      deleted: [],
+      wouldDelete: ids,
+      reasons: Object.fromEntries(reasons),
+      skipped: false,
+      dryRun: true,
+      aborted: false,
+    };
   }
   for (let index = 0; index < ids.length; index += CLEANUP_DELETE_BATCH) {
     await deletePublicationIds(env, ids.slice(index, index + CLEANUP_DELETE_BATCH));
   }
   console.log(`[limpieza] ${ids.length} vacantes eliminadas.`);
-  return { deleted: ids, reasons: Object.fromEntries(reasons), skipped: false };
+  return {
+    deleted: ids,
+    wouldDelete: ids,
+    reasons: Object.fromEntries(reasons),
+    skipped: false,
+    dryRun: false,
+    aborted: false,
+  };
 }
 
-function responseHeaders(contentType, extra = {}) {
+function contentSecurityPolicy(env) {
+  let supabaseHost = "";
+  try {
+    supabaseHost = new URL(env.SUPABASE_URL).hostname;
+  } catch {
+    supabaseHost = "";
+  }
+  const imgSources = [
+    "'self'",
+    "data:",
+    supabaseHost ? `https://${supabaseHost}` : "",
+    "https://www.googletagmanager.com",
+    "https://www.google-analytics.com",
+  ].filter(Boolean);
+  const directives = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://cdn.jsdelivr.net",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net",
+    "font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net",
+    `img-src ${imgSources.join(" ")}`,
+    "connect-src 'self' https://www.google-analytics.com https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com",
+    "frame-src https://www.googletagmanager.com",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "object-src 'none'",
+  ];
+  return `${directives.join("; ")};`;
+}
+
+function securityHeaders(env) {
+  const cspHeader = CSP_MODE === "report-only"
+    ? "Content-Security-Policy-Report-Only"
+    : "Content-Security-Policy";
   return {
-    "Content-Type": contentType,
+    [cspHeader]: contentSecurityPolicy(env),
+    "X-Frame-Options": "DENY",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
+  };
+}
+
+function applySecurityHeaders(headers, env) {
+  for (const [name, value] of Object.entries(securityHeaders(env))) headers.set(name, value);
+  return headers;
+}
+
+function responseHeaders(contentType, extra = {}, env = {}) {
+  return {
+    "Content-Type": contentType,
+    ...securityHeaders(env),
     ...extra,
   };
 }
 
-function htmlResponse(request, html, status = 200, extraHeaders = {}) {
+function htmlResponse(request, html, status = 200, extraHeaders = {}, env = {}) {
   return new Response(request.method === "HEAD" ? null : html, {
     status,
     headers: responseHeaders("text/html; charset=utf-8", {
-      "Cache-Control": "public, max-age=60, s-maxage=60",
+      "Cache-Control": "public, max-age=60, s-maxage=300",
       ...extraHeaders,
-    }),
+    }, env),
+  });
+}
+
+function unavailableDetailPage(request, env, { status, title, heading, message, cacheControl }) {
+  const html = `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,follow">
+  <title>${escapeHtml(title)}</title>
+</head>
+<body>
+  <main>
+    <h1>${escapeHtml(heading)}</h1>
+    <p>${escapeHtml(message)}</p>
+    <p><a href="/empleos">Ver ofertas vigentes</a></p>
+  </main>
+</body>
+</html>`;
+  return htmlResponse(request, html, status, { "Cache-Control": cacheControl }, env);
+}
+
+function canonicalDetailRedirect(env, slug) {
+  return new Response(null, {
+    status: 301,
+    headers: responseHeaders("text/html; charset=utf-8", {
+      "Cache-Control": "public, max-age=3600",
+      Location: `/empleos/${slug}`,
+    }, env),
   });
 }
 
@@ -648,92 +813,10 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@400;600;700;800&display=swap" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="/assets/css/custom.css" rel="stylesheet">
-  <style>
-    .jobs-page { min-height: 65vh; }
-    .jobs-hero { position: relative; overflow: hidden; padding: 8.5rem 0 4.5rem; background: linear-gradient(125deg, #081a40 0%, #0a1f4d 55%, #145bc2 100%); color: #fff; }
-    .jobs-hero::before, .jobs-hero::after { position: absolute; content: ""; border-radius: 50%; pointer-events: none; }
-    .jobs-hero::before { width: 420px; height: 420px; right: -120px; top: -240px; background: rgba(91, 157, 255, .22); }
-    .jobs-hero::after { width: 280px; height: 280px; right: 24%; bottom: -240px; background: rgba(91, 157, 255, .12); }
-    .jobs-hero .container { position: relative; z-index: 1; }
-    .jobs-kicker { display: inline-flex; align-items: center; gap: .55rem; margin-bottom: 1.1rem; color: #dce9ff; font-size: .78rem; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
-    .jobs-kicker::before { width: 8px; height: 8px; border-radius: 50%; background: #64d9a1; content: ""; }
-    .jobs-hero h1 { max-width: 700px; margin: 0 0 1rem; color: #fff; font-size: clamp(1.9rem, 3.2vw, 2.5rem); line-height: 1.2; }
-    .jobs-hero-copy > p { max-width: 610px; margin-bottom: 1.7rem; color: rgba(255,255,255,.8); font-size: 1.08rem; }
-    .jobs-hero-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.5rem; }
-    .jobs-hero-count { display: flex; align-items: center; gap: .7rem; }
-    .jobs-hero-count strong { color: #fff; font-family: var(--n-font-display); font-size: 1.8rem; line-height: 1; }
-    .jobs-hero-count span, .jobs-validity { color: rgba(255,255,255,.8); font-size: .92rem; }
-    .jobs-validity { padding-left: 1.3rem; border-left: 1px solid rgba(255,255,255,.28); }
-    .jobs-hero-art { display: flex; justify-content: center; padding: 1rem; }
-    .jobs-hero-card { width: min(100%, 350px); padding: 1.6rem; border: 1px solid rgba(255,255,255,.65); border-radius: 22px; background: rgba(255,255,255,.96); box-shadow: 0 24px 60px rgba(0,0,0,.2); transform: rotate(2deg); }
-    .jobs-art-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.4rem; color: var(--n-slate); font-size: .8rem; font-weight: 600; }
-    .jobs-art-status { padding: .35rem .65rem; border-radius: 99px; background: #e7f9f0; color: #12804f; }
-    .jobs-art-icon { display: grid; width: 52px; height: 52px; margin-bottom: 1rem; place-items: center; border-radius: 15px; background: #e9f0fb; color: var(--n-primary); font-size: 1.25rem; font-weight: 800; }
-    .jobs-hero-card h2 { margin-bottom: .6rem; font-size: 1.3rem; }
-    .jobs-hero-card p { margin: 0; color: var(--n-slate); font-size: .92rem; }
-    .jobs-content { padding: clamp(2.5rem, 5vw, 4.5rem) 0; }
-    .jobs-section-head { display: flex; justify-content: space-between; align-items: end; gap: 1rem; margin-bottom: 1.75rem; }
-    .jobs-section-head .eyebrow { margin-bottom: .7rem; }
-    .jobs-section-head h2 { margin-bottom: .35rem; font-size: clamp(1.4rem, 2vw, 1.9rem); }
-    .jobs-section-head p { margin: 0; }
-    .jobs-result-count { flex: 0 0 auto; padding: .65rem 1rem; border: 1px solid var(--n-border); border-radius: 99px; background: #fff; color: var(--n-navy); font-size: .9rem; font-weight: 700; }
-    .jobs-search { display: grid; grid-template-columns: minmax(220px, 1.8fr) minmax(150px, 1fr) repeat(2, minmax(145px, .8fr)) auto; gap: .85rem; align-items: end; margin-bottom: 1.75rem; padding: 1.2rem; border: 1px solid var(--n-border); border-radius: 16px; background: #fff; box-shadow: var(--n-shadow-sm); }
-    .jobs-search-field label { display: block; margin-bottom: .4rem; color: var(--n-navy); font-size: .82rem; font-weight: 700; }
-    .jobs-search .form-control { min-height: 46px; border-color: var(--n-border); border-radius: 10px; }
-    .jobs-search-actions { display: flex; gap: .5rem; }
-    .jobs-search-actions .btn { min-height: 46px; white-space: nowrap; }
-    .jobs-nav { background: rgba(255,255,255,.96); box-shadow: var(--n-shadow-sm); }
-    .jobs-card { display: flex; height: 100%; flex-direction: column; overflow: hidden; padding: 0; border: 1px solid var(--n-border); border-radius: 18px; background: #fff; box-shadow: var(--n-shadow-sm); transition: transform .2s ease, box-shadow .2s ease; }
-    .jobs-card:hover { transform: translateY(-4px); box-shadow: var(--n-shadow-md); }
-    .jobs-card-media { display: grid; aspect-ratio: 16 / 9; overflow: hidden; place-items: center; border-bottom: 1px solid var(--n-border); background: #f3f6fb; }
-    .jobs-card img { width: 100%; height: 100%; object-fit: contain; }
-    .jobs-card-body { display: flex; height: 100%; flex-direction: column; padding: 1.4rem; }
-    .jobs-card-label { align-self: flex-start; margin-bottom: .75rem; padding: .35rem .7rem; border-radius: 99px; background: #e9f0fb; color: var(--n-primary); font-size: .72rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-    .jobs-card-title { margin-bottom: .9rem; color: var(--n-navy); font-size: 1.15rem; line-height: 1.4; }
-    .jobs-card-facts { display: flex; flex-wrap: wrap; gap: .5rem 1rem; margin: 0 0 1rem; padding: 0; color: var(--n-slate); font-size: .84rem; list-style: none; }
-    .jobs-card-salary { margin: 0 0 .85rem; color: var(--n-navy); font-weight: 700; }
-    .jobs-card-description { display: -webkit-box; overflow: hidden; margin: 0 0 1.3rem; color: var(--n-slate); font-size: .92rem; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-    .jobs-card-action { display: flex; justify-content: center; align-items: center; gap: .55rem; margin-top: auto; padding: .75rem 1rem; border: 0; border-radius: 10px; background: var(--n-primary); color: #fff; font-weight: 700; text-decoration: none; }
-    .jobs-card-action:hover { background: var(--n-primary-dark); color: #fff; }
-    .jobs-whatsapp-button { border-color: #1f9d55; background: #1f9d55; color: #fff; font-weight: 700; }
-    .jobs-whatsapp-button:hover { border-color: #187c42; background: #187c42; color: #fff; }
-    .jobs-detail-cta-copy { margin: 0; color: var(--n-slate); font-size: .88rem; line-height: 1.55; }
-    .jobs-detail-page { background: #f7f9fc; }
-    .jobs-detail-unavailable { padding: 4rem 1rem; text-align: center; }
-    .jobs-detail-unavailable h1 { margin-bottom: .75rem; color: var(--n-navy); font-size: 1.6rem; }
-    .jobs-detail-container { padding-top: 2rem; padding-bottom: 4rem; }
-    .jobs-detail-breadcrumb { margin-bottom: 1.5rem; color: var(--n-slate); font-size: .9rem; }
-    .jobs-detail-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(280px, .72fr); gap: 1.5rem; align-items: start; }
-    .jobs-detail-main, .jobs-detail-summary, .jobs-detail-note { border: 1px solid var(--n-border); border-radius: 20px; background: #fff; box-shadow: var(--n-shadow-sm); }
-    .jobs-detail-header { padding: 2rem 2rem 1.25rem; }
-    .jobs-detail-status { display: inline-flex; margin-bottom: 1rem; padding: .4rem .8rem; border-radius: 99px; background: #e7f9f0; color: #12804f; font-size: .76rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
-    .jobs-detail-title { margin: 0 0 .8rem; color: var(--n-navy); font-size: clamp(1.6rem, 2.4vw, 2.1rem); line-height: 1.2; overflow-wrap: anywhere; }
-    .jobs-detail-subtitle { margin: 0; color: var(--n-slate); }
-    .jobs-detail-visual { padding: 0 2rem; }
-    .jobs-detail-image { display: block; width: 100%; max-height: 600px; min-height: 250px; object-fit: contain; background: #f3f6fb; border: 1px solid var(--n-border); border-radius: 16px; }
-    .jobs-detail-description { padding: 1.5rem 2rem 2rem; }
-    .jobs-detail-description h2, .jobs-detail-summary h2 { margin-bottom: 1.1rem; color: var(--n-navy); font-size: 1.1rem; }
-    .jobs-detail-copy { color: #39465d; font-size: 1rem; line-height: 1.8; white-space: pre-line; overflow-wrap: anywhere; }
-    .jobs-detail-sidebar { display: grid; gap: 1rem; }
-    .jobs-detail-summary { padding: 1.5rem; }
-    .jobs-detail-facts { display: grid; gap: .8rem; margin: 0; }
-    .jobs-detail-fact { padding-bottom: .8rem; border-bottom: 1px solid var(--n-border); }
-    .jobs-detail-fact dt { margin-bottom: .2rem; color: var(--n-slate); font-size: .78rem; font-weight: 600; }
-    .jobs-detail-fact dt i { margin-right: .3rem; color: var(--n-primary); }
-    .jobs-detail-fact dd { margin: 0; color: var(--n-navy); font-weight: 700; overflow-wrap: anywhere; }
-    .jobs-detail-source { display: grid; gap: .7rem; margin-top: 1.2rem; }
-    .jobs-detail-source .btn { width: 100%; }
-    .jobs-detail-note { padding: 1.2rem 1.4rem; background: var(--n-gradient-soft); }
-    .jobs-detail-note strong { display: block; margin-bottom: .35rem; color: var(--n-navy); }
-    .jobs-detail-note p { margin: 0; color: var(--n-slate); font-size: .9rem; }
-    .jobs-pagination a[aria-current="page"] { color: #fff; background: var(--n-primary); }
-    .jobs-pagination { flex-wrap: wrap; justify-content: flex-start !important; }
-    @media (max-width: 991.98px) { .jobs-hero { padding-top: 2rem; } .jobs-search { grid-template-columns: repeat(2, minmax(0, 1fr)); } .jobs-detail-grid { grid-template-columns: 1fr; } .jobs-hero h1, .jobs-detail-title { font-size: 1.8rem; } .jobs-section-head h2 { font-size: 1.45rem; } .jobs-hero-count strong { font-size: 1.6rem; } }
-    @media (max-width: 767.98px) { .jobs-hero { padding: 2rem 0 3rem; text-align: left; } .jobs-hero h1, .jobs-detail-title { font-size: 1.5rem; line-height: 1.25; } .jobs-hero-art { padding: 0; } .jobs-section-head { align-items: start; flex-direction: column; text-align: left; } .jobs-section-head h2 { font-size: 1.25rem; } .jobs-validity { padding-left: 0; border-left: 0; } .jobs-detail-container { padding-top: 1.5rem; padding-bottom: 2.5rem; } .jobs-detail-header { padding: 1rem 1rem .75rem; } .jobs-detail-visual { padding: 0 1rem; } .jobs-detail-description { padding: 1rem; } .jobs-detail-summary { padding: 1rem; } .jobs-detail-copy { font-size: .875rem; line-height: 1.65; } .jobs-detail-image { min-height: 180px; } .jobs-card-body { padding: 1rem; } .jobs-card-title { font-size: .95rem; } }
-    @media (max-width: 575.98px) { .jobs-search { grid-template-columns: 1fr; } }
-  </style>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="${BOOTSTRAP_CSS_INTEGRITY}" crossorigin="anonymous">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" integrity="${BOOTSTRAP_ICONS_CSS_INTEGRITY}" crossorigin="anonymous">
+  <link href="/assets/css/custom.css?v=20261121" rel="stylesheet">
+  <link href="/assets/css/jobs.css?v=20261121" rel="stylesheet">
 </head>
 <body>
   <!-- Google Tag Manager (noscript) -->
@@ -751,12 +834,12 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
       <div class="collapse navbar-collapse" id="mainNav">
         <ul class="navbar-nav ms-auto align-items-lg-center gap-1 mt-3 mt-lg-0">
           <li class="nav-item"><a class="nav-link nav2" href="/">Inicio</a></li>
-          <li class="nav-item"><a class="nav-link nav2" href="/about.html">Nosotros</a></li>
-          <li class="nav-item"><a class="nav-link nav2" href="/services.html">Servicios</a></li>
+          <li class="nav-item"><a class="nav-link nav2" href="/about">Nosotros</a></li>
+          <li class="nav-item"><a class="nav-link nav2" href="/services">Servicios</a></li>
           <li class="nav-item"><a class="nav-link nav2 active" href="/empleos" aria-current="page">Empleos</a></li>
-          <li class="nav-item"><a class="nav-link nav2" href="/contact.html">Contacto</a></li>
+          <li class="nav-item"><a class="nav-link nav2" href="/contact">Contacto</a></li>
           <li class="nav-item ms-lg-2 mt-2 mt-lg-0">
-            <a href="/contact.html" class="btn btn-primary btn-sm-custom w-100">Solicitar servicio</a>
+            <a href="/contact" class="btn btn-primary btn-sm-custom w-100">Solicitar servicio</a>
           </li>
         </ul>
       </div>
@@ -769,47 +852,41 @@ function layout({ title, description, canonical, image, body, robots = "index,fo
         <div class="col-lg-4 col-md-6">
           <a class="d-inline-block mb-3" href="/"><img src="/assets/img/logo1.png" alt="Grupo Avitar" style="height:48px;width:auto;"></a>
           <p class="text-white-50 mb-4" style="max-width:320px;">Servicio especializado en la elaboración, organización y optimización de documentos laborales y profesionales.</p>
-          <div class="d-flex gap-2">
-            <a href="#" class="social-icon" aria-label="X"><i class="fa-brands fa-x-twitter"></i></a>
-            <a href="#" class="social-icon" aria-label="LinkedIn"><i class="fa-brands fa-linkedin-in"></i></a>
-            <a href="#" class="social-icon" aria-label="Facebook"><i class="fa-brands fa-facebook-f"></i></a>
-            <a href="#" class="social-icon" aria-label="Instagram"><i class="fa-brands fa-instagram"></i></a>
-          </div>
+          <!-- TODO: URL redes -->
         </div>
         <div class="col-lg-2 col-md-6 col-6">
           <h6>Empresa</h6>
-          <a href="/about.html">Sobre nosotros</a>
-          <a href="/services.html">Servicios</a>
+          <a href="/about">Sobre nosotros</a>
+          <a href="/services">Servicios</a>
           <a href="/empleos">Ofertas de empleo</a>
-          <a href="/contact.html">Contacto</a>
+          <a href="/contact">Contacto</a>
         </div>
         <div class="col-lg-2 col-md-6 col-6">
           <h6>Servicios</h6>
-          <a href="/servicio-ats.html">Hojas de Vida ATS</a>
-          <a href="/servicio-hdv.html">Hojas de Vida Profesionales</a>
-          <a href="/servicio-ctr.html">Cartas de Renuncia</a>
-          <a href="/services.html#optimizacion">Optimización de Perfiles</a>
-          <a href="/servicio-ctp.html">Catálogos e Infoproductos</a>
+          <a href="/servicio-ats">Hojas de Vida ATS</a>
+          <a href="/servicio-hdv">Hojas de Vida Profesionales</a>
+          <a href="/servicio-ctr">Cartas de Renuncia</a>
+          <a href="/services#optimizacion">Optimización de Perfiles</a>
+          <a href="/servicio-ctp">Catálogos e Infoproductos</a>
         </div>
         <div class="col-lg-4 col-md-6">
           <h6>Contáctanos</h6>
           <p class="text-white-50 mb-3">Escríbenos y cuéntanos qué necesitas. Nuestro equipo te orientará sobre el servicio que puede ayudarte.</p>
-          <a href="https://wa.me/573019441676" target="_blank" rel="noopener" class="btn btn-primary"><i class="fa-brands fa-whatsapp me-1"></i> Escribir por WhatsApp</a>
+          <a href="https://wa.me/573019441676" target="_blank" rel="noopener noreferrer" class="btn btn-primary"><i class="bi bi-whatsapp me-1"></i> Escribir por WhatsApp</a>
         </div>
       </div>
       <div class="footer-bottom d-flex flex-column flex-md-row justify-content-between align-items-center gap-2 text-center text-md-start">
         <p class="mb-0">&copy; ${new Date().getFullYear()} Grupo Avitar. Todos los derechos reservados.</p>
         <div class="d-flex flex-wrap gap-4">
-          <a href="/privacidad.html" class="mb-0">Política de Privacidad</a>
-          <a href="/terminos.html" class="mb-0">Términos y Condiciones</a>
-          <a href="/cookies.html" class="mb-0">Política de Cookies</a>
+          <a href="/privacidad" class="mb-0">Política de Privacidad</a>
+          <a href="/terminos" class="mb-0">Términos y Condiciones</a>
+          <a href="/cookies" class="mb-0">Política de Cookies</a>
         </div>
       </div>
     </div>
   </footer>
-  <script src="https://kit.fontawesome.com/3140323153.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="/assets/js/main.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="${BOOTSTRAP_JS_INTEGRITY}" crossorigin="anonymous"></script>
+  <script src="/assets/js/main.js?v=20261121"></script>
   ${analyticsData ? `<script>
     (function () {
       window.dataLayer = window.dataLayer || [];
@@ -915,6 +992,65 @@ function itemListJsonLd(vacancies, siteUrl) {
   });
 }
 
+function breadcrumbJsonLd(items) {
+  return jsonLd({
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: items.map((item, index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      name: item.name,
+      item: item.url,
+    })),
+  });
+}
+
+function cityFromVacancy(vacancy) {
+  const city = text(vacancy.location).split(",")[0].trim();
+  return isUnavailable(city) ? "" : city.slice(0, 100);
+}
+
+function cityGroups(vacancies) {
+  const groups = new Map();
+  for (const vacancy of vacancies) {
+    const label = cityFromVacancy(vacancy);
+    const key = normalize(label);
+    const slug = slugify(label);
+    if (!key || !slug) continue;
+    const group = groups.get(key) || { key, slug, labels: new Map(), vacancies: [] };
+    group.labels.set(label, (group.labels.get(label) || 0) + 1);
+    group.vacancies.push(vacancy);
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      key: group.key,
+      slug: group.slug,
+      label: [...group.labels.entries()]
+        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "es"))[0][0],
+      count: group.vacancies.length,
+      vacancies: group.vacancies,
+    }))
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label, "es"));
+}
+
+function cityLinks(vacancies, siteUrl) {
+  const cities = cityGroups(vacancies).slice(0, 6);
+  if (!cities.length) return "";
+  return `<section class="jobs-cities" aria-labelledby="jobs-cities-title">
+    <div class="container">
+      <h2 class="section-title h4" id="jobs-cities-title">Empleos por ciudad</h2>
+      <div class="jobs-city-links">${cities.map((city) => `<a class="jobs-city-link" href="${escapeHtml(`${siteUrl}/empleos/ciudad/${city.slug}`)}">${escapeHtml(city.label)} <span>${city.count}</span></a>`).join("")}</div>
+    </div>
+  </section>`;
+}
+
+function parseCityRoute(pathname) {
+  const match = pathname.match(/^\/empleos\/ciudad\/([^/]+)$/);
+  const slug = match?.[1] || "";
+  return /^[a-z0-9-]+$/.test(slug) ? slug : null;
+}
+
 function jobPostingJsonLd(vacancy, siteUrl) {
   if (
     isUnavailable(vacancy.title) ||
@@ -924,18 +1060,30 @@ function jobPostingJsonLd(vacancy, siteUrl) {
   ) {
     return "";
   }
-  const description = [
-    vacancy.description,
-    isUnavailable(vacancy.requirements?.join(""))
-      ? ""
-      : `Requisitos: ${vacancy.requirements.join(", ")}`,
-  ].filter(Boolean).join("<br><br>");
+  const requirements = isUnavailable(vacancy.requirements?.join(""))
+    ? ""
+    : `Requisitos: ${vacancy.requirements.map(escapeHtml).join(", ")}`;
+  const description = [escapeHtml(vacancy.description), requirements]
+    .filter(Boolean)
+    .join("<br><br>");
+  const addressParts = vacancy.location.split(",").map((part) => part.trim()).filter(Boolean);
+  const region = addressParts[1];
+  const validThrough = new Date(
+    new Date(vacancy.publishedAt).getTime() + PUBLICATION_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
   const schema = {
     "@context": "https://schema.org",
     "@type": "JobPosting",
     title: vacancy.title,
     description,
     datePosted: vacancy.publishedAt,
+    validThrough,
+    identifier: {
+      "@type": "PropertyValue",
+      name: "Grupo Avitar",
+      value: vacancy.id,
+    },
+    directApply: false,
     hiringOrganization: {
       "@type": "Organization",
       name: vacancy.company,
@@ -944,12 +1092,26 @@ function jobPostingJsonLd(vacancy, siteUrl) {
       "@type": "Place",
       address: {
         "@type": "PostalAddress",
-        addressLocality: vacancy.location,
+        addressLocality: addressParts[0] || vacancy.location,
+        addressCountry: "CO",
+        ...(region && !/^(colombia|co|d\.?c\.?|dc)$/.test(normalize(region))
+          ? { addressRegion: region.slice(0, 120) }
+          : {}),
       },
     },
     url: `${siteUrl}/empleos/${vacancy.slug}`,
   };
-  const employmentType = EMPLOYMENT_TYPE_MAP[normalize(vacancy.contractType || "")];
+  const salary = parseCopSalary(vacancy.salary);
+  if (salary) {
+    const value = { "@type": "QuantitativeValue" };
+    if (salary.min === salary.max) value.value = salary.min;
+    else {
+      value.minValue = salary.min;
+      value.maxValue = salary.max;
+    }
+    schema.baseSalary = { "@type": "MonetaryAmount", currency: "COP", value };
+  }
+  const employmentType = employmentTypeFrom(vacancy.contractType);
   if (employmentType) schema.employmentType = employmentType;
   return jsonLd(schema);
 }
@@ -980,7 +1142,7 @@ function listingCard(vacancy, siteUrl) {
         <p class="jobs-card-salary">Salario: ${escapeHtml(displayValue(vacancy.salary))}</p>
         ${description}
         ${requirements}
-        <a class="jobs-card-action btn btn-primary" href="${escapeHtml(`${siteUrl}/empleos/${vacancy.slug}`)}"><span>Ver detalle</span><i class="fa-solid fa-arrow-right" aria-hidden="true"></i></a>
+        <a class="jobs-card-action btn btn-primary" href="${escapeHtml(`${siteUrl}/empleos/${vacancy.slug}`)}"><span>Ver detalle</span><i class="bi bi-arrow-right" aria-hidden="true"></i></a>
       </div>
     </div>
   </article>`;
@@ -1003,7 +1165,7 @@ function renderFeaturedJobs(vacancies, env) {
       </div>
       <div class="home-jobs-toolbar">
         <div class="home-jobs-search-copy">
-          <span class="home-jobs-search-icon"><i class="fa-solid fa-briefcase" aria-hidden="true"></i></span>
+          <span class="home-jobs-search-icon"><i class="bi bi-briefcase" aria-hidden="true"></i></span>
           <div>
             <h3>Encuentra tu próxima oportunidad</h3>
             <p>Busca entre las vacantes activas por cargo, empresa o palabra clave.</p>
@@ -1012,20 +1174,21 @@ function renderFeaturedJobs(vacancies, env) {
         <form class="home-jobs-search" action="/empleos" method="get" role="search">
           <div class="home-jobs-search-field">
             <label class="visually-hidden" for="home-jobs-search-input">Buscar vacantes por palabra clave</label>
-            <i class="fa-solid fa-magnifying-glass home-jobs-search-field-icon" aria-hidden="true"></i>
+            <i class="bi bi-search home-jobs-search-field-icon" aria-hidden="true"></i>
             <input id="home-jobs-search-input" class="form-control" type="search" name="q" placeholder="Ej. auxiliar, ventas, Bogotá..." maxlength="100">
           </div>
-          <button class="btn btn-primary" type="submit">Buscar <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></button>
+          <button class="btn btn-primary" type="submit">Buscar <i class="bi bi-arrow-right" aria-hidden="true"></i></button>
         </form>
         <span class="home-jobs-count"><strong>${total}</strong> ${total === 1 ? "vacante disponible" : "vacantes disponibles"}<small class="d-block fw-normal">Publicadas y vigentes</small></span>
       </div>
       <div class="home-jobs-results-head">
         <h3>Vacantes destacadas</h3>
-        <span><i class="fa-solid fa-bolt" aria-hidden="true"></i> Actualizadas constantemente</span>
+        <span><i class="bi bi-lightning-charge" aria-hidden="true"></i> Actualizadas constantemente</span>
       </div>
       ${content}
+      ${cityLinks(vacancies, siteUrl)}
       <div class="mt-5 text-center">
-        <a class="btn btn-primary btn-lg" href="/empleos">Ver todas las vacantes <i class="fa-solid fa-arrow-right" aria-hidden="true"></i></a>
+        <a class="btn btn-primary btn-lg" href="/empleos">Ver todas las vacantes <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
       </div>
     </div>
   </section>`;
@@ -1047,8 +1210,15 @@ function parseListingFilters(url) {
   }
   const filtersApplied = Boolean(searchTerm || cityTerm || startDate || endDate);
   const page = Number(rawPage);
-  if (!Number.isSafeInteger(page) || (!filtersApplied && page > 1)) return null;
+  if (!Number.isSafeInteger(page)) return null;
   return { searchTerm, cityTerm, startDate, endDate, filtersApplied, page };
+}
+
+function parsePageNumber(url) {
+  const rawPage = url.searchParams.get("page") || "1";
+  if (!/^[1-9]\d*$/.test(rawPage)) return null;
+  const page = Number(rawPage);
+  return Number.isSafeInteger(page) && page > 0 ? page : null;
 }
 
 function renderListing(request, env, vacancies, filters) {
@@ -1079,11 +1249,11 @@ function renderListing(request, env, vacancies, filters) {
   });
   const totalPages = Math.max(1, Math.ceil(filteredVacancies.length / PAGE_SIZE));
   if (page > totalPages) {
-    return htmlResponse(request, "<!doctype html><title>Página no encontrada</title>", 404);
+    return htmlResponse(request, "<!doctype html><title>Página no encontrada</title>", 404, {}, env);
   }
 
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
-  const canonical = `${siteUrl}/empleos${filtersApplied && page > 1 ? `?page=${page}` : ""}`;
+  const canonical = `${siteUrl}/empleos${page > 1 ? `?page=${page}` : ""}`;
   const pageItems = filteredVacancies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const cards = pageItems.map((vacancy) => listingCard(vacancy, siteUrl)).join("");
   const pagination = totalPages > 1
@@ -1130,7 +1300,7 @@ function renderListing(request, env, vacancies, filters) {
             <div class="jobs-hero-art" aria-hidden="true">
               <div class="jobs-hero-card">
                 <div class="jobs-art-top"><span>Grupo Avitar</span><span class="jobs-art-status">Actualizadas</span></div>
-                <span class="jobs-art-icon"><i class="fa-solid fa-briefcase" aria-hidden="true"></i></span>
+                <span class="jobs-art-icon"><i class="bi bi-briefcase" aria-hidden="true"></i></span>
                 <h2>Oportunidades laborales</h2>
                 <p>Consulta los detalles y la publicación de origen de cada vacante.</p>
               </div>
@@ -1177,6 +1347,7 @@ function renderListing(request, env, vacancies, filters) {
         : `<p class="card-premium">${emptyMessage}</p>`}
     </div>
     </section>
+    ${cityLinks(vacancies, siteUrl)}
   </main>`;
   return htmlResponse(
     request,
@@ -1188,19 +1359,121 @@ function renderListing(request, env, vacancies, filters) {
       robots: filtersApplied ? "noindex,follow" : "index,follow",
       structuredData: filtersApplied ? "" : itemListJsonLd(pageItems, siteUrl),
     }),
+    200,
+    {},
+    env,
+  );
+}
+
+function renderCityPage(request, env, vacancies, city, page) {
+  const siteUrl = env.SITE_URL.replace(/\/+$/, "");
+  const totalPages = Math.max(1, Math.ceil(city.count / PAGE_SIZE));
+  if (page > totalPages) {
+    return unavailableDetailPage(request, env, {
+      status: 404,
+      title: "Página de ciudad no encontrada | Grupo Avitar",
+      heading: "No encontramos esta página de empleos",
+      message: "La ciudad no tiene tantas vacantes activas. Revisa el listado general de empleos.",
+      cacheControl: "no-store",
+    });
+  }
+  const pageItems = city.vacancies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const companyCount = new Set(
+    city.vacancies
+      .map((vacancy) => displayValue(vacancy.company, ""))
+      .filter((company) => company && !isUnavailable(company)),
+  ).size;
+  const vacancyWord = city.count === 1 ? "vacante activa" : "vacantes activas";
+  const companyWord = companyCount === 1 ? "empresa" : "empresas";
+  const summary = `Hay ${city.count} ${vacancyWord} en ${city.label}${companyCount ? `, publicadas por ${companyCount} ${companyWord}` : ""}.`;
+  const canonical = `${siteUrl}/empleos/ciudad/${city.slug}${page > 1 ? `?page=${page}` : ""}`;
+  const title = `Empleos en ${city.label}: ${city.count} ${vacancyWord} | Grupo Avitar`;
+  const description = `${summary} Consulta las ofertas vigentes y postúlate con el contacto publicado por cada anunciante.`;
+  const pagination = totalPages > 1
+    ? `<nav class="jobs-pagination d-flex justify-content-center gap-2 mt-5" aria-label="Paginación">${Array.from({ length: totalPages }, (_, index) => {
+        const pageNumber = index + 1;
+        const href = `/empleos/ciudad/${city.slug}${pageNumber > 1 ? `?page=${pageNumber}` : ""}`;
+        return `<a class="btn btn-light-custom ${pageNumber === page ? "active" : ""}" href="${escapeHtml(href)}"${pageNumber === page ? ' aria-current="page"' : ""}>${pageNumber}</a>`;
+      }).join("")}</nav>`
+    : "";
+  const body = `<main class="jobs-page jobs-city-page">
+    <header class="jobs-hero">
+      <div class="container">
+        <div class="row align-items-center g-5">
+          <div class="col-lg-8 jobs-hero-copy">
+            <span class="jobs-kicker">Empleo · ${escapeHtml(city.label)}</span>
+            <h1>Empleos en ${escapeHtml(city.label)}</h1>
+            <p>${escapeHtml(summary)}</p>
+            <div class="jobs-hero-stats">
+              <div class="jobs-hero-count"><strong>${city.count}</strong><span>${vacancyWord}</span></div>
+              <span class="jobs-validity">Publicaciones vigentes durante 15 días</span>
+            </div>
+          </div>
+          <div class="col-lg-4">
+            <div class="jobs-hero-art" aria-hidden="true">
+              <div class="jobs-hero-card">
+                <span class="jobs-art-icon"><i class="bi bi-geo-alt" aria-hidden="true"></i></span>
+                <h2>Oportunidades en ${escapeHtml(city.label)}</h2>
+                <p>Revisa el detalle y el contacto de cada vacante.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </header>
+    <section class="jobs-content">
+      <div class="container">
+        <nav aria-label="Ruta de navegación" class="jobs-detail-breadcrumb">
+          <a href="/">Inicio</a> <span aria-hidden="true">/</span> <a href="/empleos">Empleos</a> <span aria-hidden="true">/</span> <span aria-current="page">${escapeHtml(city.label)}</span>
+        </nav>
+        <header class="jobs-section-head">
+          <div>
+            <span class="eyebrow">Ofertas en ${escapeHtml(city.label)}</span>
+            <h2>Vacantes disponibles</h2>
+            <p>${escapeHtml(summary)}</p>
+          </div>
+          <span class="jobs-result-count">${city.count} ${vacancyWord}<small class="d-block fw-normal">Mostrando ${pageItems.length} en esta página</small></span>
+        </header>
+        <div class="row g-4">${pageItems.map((vacancy) => listingCard(vacancy, siteUrl)).join("")}</div>
+        ${pagination}
+      </div>
+    </section>
+    ${cityLinks(vacancies, siteUrl)}
+  </main>`;
+  return htmlResponse(
+    request,
+    layout({
+      title,
+      description,
+      canonical,
+      body,
+      structuredData: `${breadcrumbJsonLd([
+        { name: "Inicio", url: `${siteUrl}/` },
+        { name: "Empleos", url: `${siteUrl}/empleos` },
+        { name: city.label, url: canonical },
+      ])}${itemListJsonLd(pageItems, siteUrl)}`,
+    }),
+    200,
+    {},
+    env,
   );
 }
 
 function renderDetail(request, env, vacancies, slug) {
-  const vacancy = vacancies.find((item) => item.slug === slug);
+  const idSuffix = slug.match(/-([0-9a-f]{8})$/i)?.[1]?.toLowerCase() || "";
+  const vacancy = vacancies.find(
+    (item) => item.slug.slice(-8).toLowerCase() === idSuffix,
+  );
   if (!vacancy) {
-    return htmlResponse(
-      request,
-      "<!doctype html><html lang=\"es\"><head><meta name=\"robots\" content=\"noindex,follow\"><title>Oferta no disponible | Grupo Avitar</title></head><body><main><h1>Esta oferta ya no está disponible</h1><a href=\"/empleos\">Ver ofertas vigentes</a></main></body></html>",
-      404,
-      { "Cache-Control": "no-store" },
-    );
+    return unavailableDetailPage(request, env, {
+      status: 410,
+      title: "Oferta vencida | Grupo Avitar",
+      heading: "Esta oferta ya no está disponible",
+      message: "La publicación venció o fue retirada. Consulta las vacantes vigentes.",
+      cacheControl: "public, max-age=60",
+    });
   }
+  if (vacancy.slug !== slug) return canonicalDetailRedirect(env, vacancy.slug);
 
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
   const canonical = `${siteUrl}/empleos/${vacancy.slug}`;
@@ -1211,23 +1484,26 @@ function renderDetail(request, env, vacancies, slug) {
   const contractType = displayValue(vacancy.contractType);
   const contactLabel = displayValue(vacancy.contactLabel);
   const contactValue = vacancy.contactUrl && !isUnavailable(contactLabel)
-    ? `<a href="${escapeHtml(vacancy.contactUrl)}" rel="nofollow noopener noreferrer" target="_blank">${escapeHtml(contactLabel)} <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i></a>`
+    ? `<a href="${escapeHtml(vacancy.contactUrl)}" rel="nofollow noopener noreferrer" target="_blank">${escapeHtml(contactLabel)} <i class="bi bi-box-arrow-up-right" aria-hidden="true"></i></a>`
     : escapeHtml(contactLabel);
   const details = [
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-building" aria-hidden="true"></i> Empresa</dt><dd>${escapeHtml(company)}</dd></div>`,
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-location-dot" aria-hidden="true"></i> Ubicación</dt><dd>${escapeHtml(location)}</dd></div>`,
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-money-bill-wave" aria-hidden="true"></i> Salario</dt><dd>${escapeHtml(salary)}</dd></div>`,
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-file-contract" aria-hidden="true"></i> Tipo de contrato</dt><dd>${escapeHtml(contractType)}</dd></div>`,
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-address-book" aria-hidden="true"></i> Contacto</dt><dd>${contactValue}</dd></div>`,
-    `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-calendar-days" aria-hidden="true"></i> Fecha de publicación</dt><dd><time datetime="${escapeHtml(vacancy.publishedAt)}">${escapeHtml(formatDate(vacancy.publishedAt))}</time></dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-building" aria-hidden="true"></i> Empresa</dt><dd>${escapeHtml(company)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-geo-alt" aria-hidden="true"></i> Ubicación</dt><dd>${escapeHtml(location)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-cash-coin" aria-hidden="true"></i> Salario</dt><dd>${escapeHtml(salary)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-file-earmark-text" aria-hidden="true"></i> Tipo de contrato</dt><dd>${escapeHtml(contractType)}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-person-vcard" aria-hidden="true"></i> Contacto</dt><dd>${contactValue}</dd></div>`,
+    `<div class="jobs-detail-fact"><dt><i class="bi bi-calendar3" aria-hidden="true"></i> Fecha de publicación</dt><dd><time datetime="${escapeHtml(vacancy.publishedAt)}">${escapeHtml(formatDate(vacancy.publishedAt))}</time></dd></div>`,
     vacancy.channelName
-      ? `<div class="jobs-detail-fact"><dt><i class="fa-solid fa-bullhorn" aria-hidden="true"></i> Canal de origen</dt><dd>${escapeHtml(vacancy.channelName)}</dd></div>`
+      ? `<div class="jobs-detail-fact"><dt><i class="bi bi-megaphone" aria-hidden="true"></i> Canal de origen</dt><dd>${escapeHtml(vacancy.channelName)}</dd></div>`
       : "",
   ].filter(Boolean).join("");
   const originalChannel = vacancy.channelUrl
-    ? `<a class="btn btn-light-custom" href="${escapeHtml(vacancy.channelUrl)}" rel="nofollow noopener noreferrer" target="_blank"><i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Consultar canal original</a>`
+    ? `<a class="btn btn-light-custom" href="${escapeHtml(vacancy.channelUrl)}" rel="nofollow noopener noreferrer" target="_blank"><i class="bi bi-box-arrow-up-right" aria-hidden="true"></i> Consultar canal original</a>`
     : "";
   const whatsappUrl = escapeHtml(vacancyWhatsAppUrl(vacancy));
+  const reportUrl = escapeHtml(
+    `mailto:contacto@grupoavitar.com?subject=${encodeURIComponent(`Reporte de vacante: ${vacancy.slug}`)}`,
+  );
   const subtitle = [
     !isUnavailable(company) ? company : "",
     !isUnavailable(location) ? `Empleo en ${escapeHtml(location)}` : "",
@@ -1247,35 +1523,42 @@ function renderDetail(request, env, vacancies, slug) {
         <a href="/">Inicio</a> <span aria-hidden="true">/</span> <a href="/empleos">Empleos</a> <span aria-hidden="true">/</span> <span aria-current="page">${escapeHtml(vacancy.title)}</span>
       </nav>
       <div class="jobs-detail-grid">
-        <article class="jobs-detail-main" itemscope itemtype="https://schema.org/Article">
+        <article class="jobs-detail-main">
           <header class="jobs-detail-header">
             <span class="jobs-detail-status">Publicación reciente</span>
-            <h1 class="jobs-detail-title" itemprop="headline">${escapeHtml(vacancy.title)}</h1>
+            <h1 class="jobs-detail-title">${escapeHtml(vacancy.title)}</h1>
             <p class="jobs-detail-subtitle">${subtitle}</p>
           </header>
           <figure class="jobs-detail-visual">${image}</figure>
           <section class="jobs-detail-description">
             <h2>Descripción de la vacante</h2>
-            <p class="jobs-detail-copy" itemprop="description">${escapeHtml(description)}</p>
+            <p class="jobs-detail-copy">${escapeHtml(description)}</p>
             <h2>Requisitos</h2>
             <p class="jobs-detail-copy">${escapeHtml(requirements)}</p>
           </section>
         </article>
         <aside class="jobs-detail-sidebar" aria-label="Información de la vacante">
+          <section class="jobs-detail-apply">
+            <h2>Cómo postularte</h2>
+            <p>Usa el contacto publicado por el anunciante. Grupo Avitar no recibe ni tramita postulaciones.</p>
+            <p class="jobs-detail-apply-contact">${contactValue}</p>
+            ${originalChannel}
+            <a class="btn btn-primary" href="/empleos"><i class="bi bi-arrow-left" aria-hidden="true"></i> Ver todas las vacantes</a>
+          </section>
+          <section class="jobs-detail-optional">
+            <h2>Servicio opcional de Grupo Avitar</h2>
+            <p class="jobs-detail-cta-copy">¿Quieres postularte con una hoja de vida clara y enfocada en este cargo? Te ayudamos a prepararla; este servicio es opcional e independiente de la vacante.</p>
+            <a id="vacancy-whatsapp-cta" class="btn jobs-whatsapp-button" href="${whatsappUrl}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Solicitar hoja de vida para ${vacancy.title} por WhatsApp`)}"><i class="bi bi-whatsapp" aria-hidden="true"></i> Crear mi hoja de vida</a>
+          </section>
           <section class="jobs-detail-summary">
             <h2>Información clave</h2>
             <dl class="jobs-detail-facts">${details}</dl>
-            <div class="jobs-detail-source">
-              <p class="jobs-detail-cta-copy">¿Quieres postularte con una hoja de vida clara y enfocada en este cargo? Escríbenos y te ayudamos.</p>
-              <a id="vacancy-whatsapp-cta" class="btn jobs-whatsapp-button" href="${whatsappUrl}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(`Solicitar hoja de vida para ${vacancy.title} por WhatsApp`)}"><i class="fa-brands fa-whatsapp" aria-hidden="true"></i> Crear mi hoja de vida</a>
-              ${originalChannel}
-              <a class="btn btn-primary" href="/empleos"><i class="fa-solid fa-arrow-left" aria-hidden="true"></i> Ver todas las vacantes</a>
-            </div>
           </section>
           <section class="jobs-detail-note">
             <strong>Información importante</strong>
-            <p>Este portal es informativo. La oferta puede haber cerrado o cambiado; confirma su disponibilidad directamente con el empleador o en el canal original antes de postularte. La publicación puede permanecer aquí hasta 15 días desde su fecha de origen.</p>
+            <p>Este portal es informativo. La oferta puede haber cerrado o cambiado; confirma su disponibilidad directamente con el anunciante o en el canal original antes de postularte. La publicación puede permanecer aquí hasta 15 días desde su fecha de origen.</p>
             <a href="/terminos">Leer Términos y Condiciones</a>
+            <a href="${reportUrl}">Reportar o solicitar el retiro de esta vacante</a>
           </section>
         </aside>
       </div>
@@ -1297,6 +1580,9 @@ function renderDetail(request, env, vacancies, slug) {
         vacancy_location: displayValue(vacancy.location, ""),
       },
     }),
+    200,
+    {},
+    env,
   );
 }
 
@@ -1319,21 +1605,39 @@ const STATIC_PAGE_PATHS = [
   "/servicio-hvm",
 ];
 
+function latestPublication(vacancies) {
+  const times = vacancies
+    .map((vacancy) => Date.parse(vacancy.publishedAt))
+    .filter((time) => Number.isFinite(time));
+  return times.length ? new Date(Math.max(...times)).toISOString() : new Date().toISOString();
+}
+
+function sitemapEntry(loc, lastmod) {
+  const date = new Date(lastmod);
+  const validLastmod = Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+  return `<url><loc>${escapeXml(loc)}</loc><lastmod>${validLastmod}</lastmod></url>`;
+}
+
 function renderSitemap(env, vacancies, head = false) {
   const siteUrl = env.SITE_URL.replace(/\/+$/, "");
-  const urls = [
-    `${siteUrl}/`,
-    ...STATIC_PAGE_PATHS.map((path) => `${siteUrl}${path}`),
-    `${siteUrl}/empleos`,
-    ...vacancies.map((vacancy) => `${siteUrl}/empleos/${vacancy.slug}`),
+  const now = new Date().toISOString();
+  const latest = latestPublication(vacancies);
+  const entries = [
+    sitemapEntry(`${siteUrl}/`, latest),
+    ...STATIC_PAGE_PATHS.map((path) => sitemapEntry(`${siteUrl}${path}`, now)),
+    sitemapEntry(`${siteUrl}/empleos`, latest),
+    ...cityGroups(vacancies).slice(0, 6).map((city) =>
+      sitemapEntry(`${siteUrl}/empleos/ciudad/${city.slug}`, latestPublication(city.vacancies)),
+    ),
+    ...vacancies.map((vacancy) =>
+      sitemapEntry(`${siteUrl}/empleos/${vacancy.slug}`, vacancy.publishedAt),
+    ),
   ];
-  const body = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls
-    .map((url) => `<url><loc>${escapeXml(url)}</loc></url>`)
-    .join("")}</urlset>`;
+  const body = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${entries.join("")}</urlset>`;
   return new Response(head ? null : body, {
     headers: responseHeaders("application/xml; charset=utf-8", {
-      "Cache-Control": "public, max-age=60, s-maxage=60",
-    }),
+      "Cache-Control": "public, max-age=60, s-maxage=300",
+    }, env),
   });
 }
 
@@ -1344,7 +1648,7 @@ function renderRobots(env, head = false) {
     {
       headers: responseHeaders("text/plain; charset=utf-8", {
         "Cache-Control": "public, max-age=3600",
-      }),
+      }, env),
     },
   );
 }
@@ -1362,13 +1666,23 @@ function validSiteUrl(value) {
   }
 }
 
+
 function isPublicSupabaseKey(key) {
   if (/^sb_publishable_[a-zA-Z0-9_-]+$/.test(key)) return true;
   return supabaseJwtRole(key) === "anon";
 }
 
 function isServiceRoleKey(key) {
-  return supabaseJwtRole(key) === "service_role";
+  return supabaseJwtRole(key) === "service_role" || /^sb_secret_[a-zA-Z0-9_-]+$/.test(text(key));
+}
+
+function hasPrivilegedKey(env) {
+  return Boolean(text(env.SUPABASE_SERVICE_ROLE_KEY) || text(env.SUPABASE_SECRET_KEY));
+}
+
+function supabaseCleanupKey(env) {
+  const key = text(env.SUPABASE_SERVICE_ROLE_KEY) || text(env.SUPABASE_SECRET_KEY);
+  return isServiceRoleKey(key) ? key : "";
 }
 
 function supabaseJwtRole(key) {
@@ -1385,11 +1699,6 @@ function supabaseJwtRole(key) {
 }
 
 function supabaseReadKey(env) {
-  if (env.SUPABASE_SERVICE_ROLE_KEY) {
-    return isServiceRoleKey(env.SUPABASE_SERVICE_ROLE_KEY)
-      ? env.SUPABASE_SERVICE_ROLE_KEY
-      : "";
-  }
   return isPublicSupabaseKey(env.SUPABASE_ANON_KEY)
     ? env.SUPABASE_ANON_KEY
     : "";
@@ -1407,8 +1716,27 @@ function validEnvironment(env) {
   }
 }
 
-export default {
-  async fetch(request, env) {
+function validCleanupEnvironment(env) {
+  if (!env.SUPABASE_URL || !supabaseCleanupKey(env)) return false;
+  try {
+    return new URL(env.SUPABASE_URL).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+const CACHEABLE_PATH = /^\/(index\.html|empleos(\/.*)?|sitemap\.xml)?$/;
+
+async function handleRequest(request, env, ctx) {
+    if (hasPrivilegedKey(env)) {
+      console.error("Configuración insegura: el Worker público no debe tener claves de servicio");
+      return new Response("No fue posible cargar las ofertas en este momento.", {
+        status: 503,
+        headers: responseHeaders("text/plain; charset=utf-8", {
+          "Cache-Control": "no-store",
+        }, env),
+      });
+    }
     const url = new URL(request.url);
     const isHomeRoute = url.pathname === "/" || url.pathname === "/index.html";
     const isDynamicRoute =
@@ -1423,7 +1751,7 @@ export default {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("Método no permitido", {
         status: 405,
-        headers: responseHeaders("text/plain; charset=utf-8", { Allow: "GET, HEAD" }),
+        headers: responseHeaders("text/plain; charset=utf-8", { Allow: "GET, HEAD" }, env),
       });
     }
     if (isHomeRoute && request.method === "HEAD") return env.ASSETS.fetch(request);
@@ -1433,7 +1761,7 @@ export default {
           status: 503,
           headers: responseHeaders("text/plain; charset=utf-8", {
             "Cache-Control": "no-store",
-          }),
+          }, env),
         });
       }
       return renderRobots(env, request.method === "HEAD");
@@ -1443,37 +1771,49 @@ export default {
         status: 503,
         headers: responseHeaders("text/plain; charset=utf-8", {
           "Cache-Control": "no-store",
-        }),
+        }, env),
       });
     }
     try {
       const now = new Date();
       const filters = url.pathname === "/empleos" ? parseListingFilters(url) : null;
+      const cityRouteSlug = parseCityRoute(url.pathname);
       if (url.pathname === "/empleos" && !filters) {
-        return htmlResponse(request, "<!doctype html><title>Solicitud inválida</title>", 400);
+        return htmlResponse(request, "<!doctype html><title>Solicitud inválida</title>", 400, {}, env);
       }
 
-      let vacancies = [];
-      if (isHomeRoute) {
-        vacancies = await getVacancies(env, now, {}, MAX_QUERY_ROWS);
-      } else if (url.pathname === "/sitemap.xml") {
-        vacancies = await getVacancies(env, now, {}, MAX_QUERY_ROWS);
-      } else if (filters) {
-        vacancies = await getVacancies(
-          env,
-          now,
-          filters,
-          filters.filtersApplied ? filters.page * PAGE_SIZE + 1 : PAGE_SIZE,
-        );
-      } else {
-        const slug = url.pathname.slice("/empleos/".length);
+      let slug = "";
+      if (!isHomeRoute && url.pathname !== "/sitemap.xml" && !filters && !cityRouteSlug) {
+        slug = url.pathname.slice("/empleos/".length);
         const idPrefix = slug.match(/-([0-9a-f]{8})$/i)?.[1];
         if (!slug || slug.includes("/") || !idPrefix) {
-          return htmlResponse(request, "<!doctype html><title>Oferta no encontrada</title>", 404, {
-            "Cache-Control": "no-store",
+          return unavailableDetailPage(request, env, {
+            status: 404,
+            title: "Oferta no encontrada | Grupo Avitar",
+            heading: "No encontramos esta oferta",
+            message: "La dirección no corresponde a una vacante válida. Revisa el listado de empleos.",
+            cacheControl: "no-store",
           });
         }
-        vacancies = await getVacancies(env, now, {}, MAX_QUERY_ROWS);
+      }
+
+      const vacancies = await getVacancies(env, ctx, now);
+
+      if (cityRouteSlug) {
+        const page = parsePageNumber(url);
+        const city = page
+          ? cityGroups(vacancies).find((item) => item.slug === cityRouteSlug && item.count >= 3)
+          : null;
+        if (!city) {
+          return unavailableDetailPage(request, env, {
+            status: 404,
+            title: "Empleos por ciudad no encontrados | Grupo Avitar",
+            heading: "No encontramos vacantes suficientes en esta ciudad",
+            message: "La página requiere al menos tres vacantes activas. Consulta el listado general de empleos.",
+            cacheControl: "no-store",
+          });
+        }
+        return renderCityPage(request, env, vacancies, city, page);
       }
 
       if (isHomeRoute) {
@@ -1491,7 +1831,8 @@ export default {
         headers.delete("Content-Encoding");
         headers.delete("ETag");
         headers.set("Content-Type", "text/html; charset=utf-8");
-        headers.set("Cache-Control", "public, max-age=60, s-maxage=60");
+        headers.set("Cache-Control", "public, max-age=60, s-maxage=300");
+        applySecurityHeaders(headers, env);
         const siteUrl = env.SITE_URL.replace(/\/+$/, "");
         return new Response(
           homeHtml
@@ -1504,7 +1845,6 @@ export default {
         return renderSitemap(env, vacancies, request.method === "HEAD");
       }
       if (filters) return renderListing(request, env, vacancies, filters);
-      const slug = url.pathname.slice("/empleos/".length);
       return renderDetail(request, env, vacancies, slug);
     } catch (error) {
       console.error("Employment page generation failed", error);
@@ -1512,18 +1852,32 @@ export default {
         status: 503,
         headers: responseHeaders("text/plain; charset=utf-8", {
           "Cache-Control": "no-store",
-        }),
+        }, env),
       });
     }
-  },
-  async scheduled(controller, env, ctx) {
-    await runCleanup(env, new Date(controller.scheduledTime));
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (request.method !== "GET" || !CACHEABLE_PATH.test(url.pathname)) {
+      return handleRequest(request, env, ctx);
+    }
+    const cache = caches.default;
+    const hit = await cache.match(request);
+    if (hit) return hit;
+    const response = await handleRequest(request, env, ctx);
+    if (response.status === 200 && /s-maxage/.test(response.headers.get("Cache-Control") || "")) {
+      ctx.waitUntil(cache.put(request, response.clone()));
+    }
+    return response;
   },
 };
 
 export {
   activeVacancies,
   displayValue,
+  getActiveVacancies,
   isPublicSupabaseKey,
   isServiceRoleKey,
   isVacancy,

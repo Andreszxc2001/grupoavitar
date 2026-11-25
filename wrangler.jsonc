@@ -1,11 +1,8 @@
 {
-  "name": "grupoavitar-empleos",
+"name": "grupoavitar",
   "main": "worker.mjs",
   "compatibility_date": "2026-11-15",
-  "workers_dev": true,
-  "triggers": {
-    "crons": ["0 13 * * *"]
-  },
+  "workers_dev": false,
   "vars": {
     "SUPABASE_URL": "https://ebrwwhjmzygiryemnmcd.supabase.co",
     "SITE_URL": "https://grupoavitar.com"

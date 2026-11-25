@@ -107,41 +107,13 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  /* ---------- Bootstrap form validation UI ---------- */
-  document.querySelectorAll('.needs-validation').forEach(form => {
-    form.addEventListener('submit', function (e) {
-      if (!form.checkValidity()) {
-        e.preventDefault();
-        e.stopPropagation();
-      } else {
-        e.preventDefault();
-        const btn = form.querySelector('button[type="submit"]');
-        if (btn) {
-          original = btn.innerHTML;
-          btn.innerHTML = 'Enviando...';
-          btn.disabled = true;
-          setTimeout(() => {
-            btn.innerHTML = 'Mensaje enviado ✓';
-            setTimeout(() => {
-              btn.innerHTML = original;
-              btn.disabled = false;
-              form.reset();
-              form.classList.remove('was-validated');
-            }, 2200);
-          }, 1000);
-        }
-      }
-      form.classList.add('was-validated');
-    }, false);
-  });
-
   /* ---------- Set active nav link based on current page ---------- */
-  const currentPage = window.location.pathname.split('/').pop() || 'index.html';
+  const currentPath = window.location.pathname.replace(/\/+$/, '') || '/';
   document.querySelectorAll('.navbar-nexora .nav-link').forEach(link => {
     const href = link.getAttribute('href');
-    if (href === currentPage) {
-      link.classList.add('active');
-    }
+    if (!href || href.startsWith('#') || href.startsWith('http')) return;
+    const linkPath = href.split('#')[0].replace(/\/+$/, '') || '/';
+    link.classList.toggle('active', linkPath === currentPath);
   });
 
 });
