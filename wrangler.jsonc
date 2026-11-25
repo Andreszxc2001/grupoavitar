@@ -1,5 +1,5 @@
 {
-  "name": "grupoavitar-empleos",
+"name": "grupoavitar",
   "main": "worker.mjs",
   "compatibility_date": "2026-11-15",
   "workers_dev": false,

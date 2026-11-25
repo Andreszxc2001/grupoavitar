@@ -1666,6 +1666,7 @@ function validSiteUrl(value) {
   }
 }
 
+
 function isPublicSupabaseKey(key) {
   if (/^sb_publishable_[a-zA-Z0-9_-]+$/.test(key)) return true;
   return supabaseJwtRole(key) === "anon";
